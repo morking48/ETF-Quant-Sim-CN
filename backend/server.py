@@ -8,7 +8,9 @@ import urllib.request
 import ssl
 import os
 import sys
-from datetime import datetime
+import time
+import threading
+from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -19,7 +21,8 @@ TF_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'etf-three-factor
 if TF_DIR not in sys.path:
     sys.path.insert(0, TF_DIR)
 
-app = Flask(__name__)
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend')
+app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path='')
 CORS(app)
 
 ssl_ctx = ssl.create_default_context()
@@ -129,10 +132,9 @@ def dprob(chg, t5_etf, t5_idx, vr, idx_chg):
 
 
 def sprob(share_delta_pct):
-    """份额概率 (权重30%) — 与原v7脚本完全一致"""
+    """份额概率 (权重30%)"""
     if share_delta_pct is None:
         return None
-    ap = abs(share_delta_pct)
     if share_delta_pct > 10:
         return 95
     elif share_delta_pct > 5:
@@ -151,12 +153,46 @@ def sprob(share_delta_pct):
         return max(0, 5 + (share_delta_pct + 5) / 5 * 5)
 
 
-_SSE_CACHE = {}
-_SZSE_CACHE = {}
+# ============================================================
+# 份额数据获取（akshare + JSON文件缓存）
+# ============================================================
+
+_SHARE_CACHE = {}      # {target_date: {code: {date: {shares_yi, delta_pct}}}}
+_SHARE_LOCK = threading.Lock()
+_SHARE_JSON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_share_cache.json')
+
+
+def _load_share_cache_from_disk():
+    """从JSON文件恢复份额缓存"""
+    global _SHARE_CACHE
+    try:
+        if os.path.exists(_SHARE_JSON_FILE):
+            with open(_SHARE_JSON_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            with _SHARE_LOCK:
+                _SHARE_CACHE = data
+            print(f"[缓存] 从磁盘恢复 {len(_SHARE_CACHE)} 天份额缓存")
+    except Exception as e:
+        print(f"[缓存] 磁盘恢复失败: {e}")
+
+
+def _save_share_cache_to_disk():
+    """将份额缓存写入JSON文件"""
+    try:
+        with _SHARE_LOCK:
+            data = dict(_SHARE_CACHE)
+        with open(_SHARE_JSON_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[缓存] 磁盘保存失败: {e}")
+
+
+# 启动时加载缓存
+_load_share_cache_from_disk()
 
 
 def _get_shares_sse(date_str):
-    """上交所ETF份额 (akshare, 带缓存)"""
+    """上交所ETF份额 (akshare fund_etf_scale_sse, 带内存缓存)"""
     if date_str in _SSE_CACHE:
         return _SSE_CACHE[date_str]
     try:
@@ -165,14 +201,14 @@ def _get_shares_sse(date_str):
         if df is not None and len(df) > 0 and '基金代码' in df.columns:
             _SSE_CACHE[date_str] = df
             return df
-    except:
+    except Exception as e:
         pass
     _SSE_CACHE[date_str] = None
     return None
 
 
 def _get_shares_szse_range(start_date, end_date):
-    """深交所ETF份额 (akshare, 带缓存)"""
+    """深交所ETF份额 (akshare fund_scale_daily_szse, 带内存缓存)"""
     cache_key = f"{start_date}_{end_date}"
     if cache_key in _SZSE_CACHE:
         return _SZSE_CACHE[cache_key]
@@ -188,15 +224,15 @@ def _get_shares_szse_range(start_date, end_date):
                 if d not in result:
                     result[d] = {}
                 result[d][code] = shares / 1e8
-    except:
+    except Exception as e:
         pass
     _SZSE_CACHE[cache_key] = result
     return result
 
 
-def fetch_share_history(codes, target_date, lookback=30):
+def fetch_share_history(codes, target_date, lookback=5):
     """
-    获取所有ETF的份额历史数据
+    获取所有ETF的份额历史数据 (默认5天, ~18s)
     返回: {code: {date: {shares_yi, delta_pct}}}
     """
     history = {}
@@ -205,18 +241,15 @@ def fetch_share_history(codes, target_date, lookback=30):
     except ImportError:
         return history
 
-    # 计算日期范围
-    from datetime import datetime, timedelta
     end_dt = datetime.strptime(target_date, '%Y-%m-%d')
     start_dt = end_dt - timedelta(days=lookback)
     start_str = start_dt.strftime('%Y%m%d')
     end_str = end_dt.strftime('%Y%m%d')
 
-    # 上交所ETF
     sse_codes = [c for c in codes if c.startswith(('51', '56'))]
     szse_codes = [c for c in codes if c.startswith(('15', '16'))]
 
-    # 逐日查上交所
+    # 逐日查上交所 
     current = end_dt
     while current >= start_dt:
         ds = current.strftime('%Y%m%d')
@@ -261,6 +294,42 @@ def fetch_share_history(codes, target_date, lookback=30):
     return history
 
 
+def get_share_data_with_cache(codes, target_date):
+    """
+    获取份额数据（磁盘缓存 + 懒加载）:
+    1. 磁盘缓存命中 → 直接返回
+    2. 未命中 → 同步加载(5天 ~18s) + 写入磁盘
+    3. 加载失败 → 返回空{} (优雅降级二因子)
+    """
+    global _SHARE_CACHE
+    
+    with _SHARE_LOCK:
+        if target_date in _SHARE_CACHE:
+            return _SHARE_CACHE[target_date]
+    
+    # 同步加载
+    try:
+        print(f"[份额] 开始加载 {target_date} 的份额数据 (5天回溯)...")
+        t0 = time.time()
+        result = fetch_share_history(codes, target_date, lookback=5)
+        elapsed = time.time() - t0
+        
+        with _SHARE_LOCK:
+            _SHARE_CACHE[target_date] = result
+        
+        # 异步写磁盘
+        t = threading.Thread(target=_save_share_cache_to_disk, daemon=True)
+        t.start()
+        
+        share_count = len(result)
+        print(f"[份额] ✓ {target_date} 完成 ({elapsed:.1f}s), {share_count}只ETF")
+        return result
+        
+    except Exception as e:
+        print(f"[份额] ✗ {target_date} 失败: {type(e).__name__}: {e}")
+        return {}
+
+
 def align_idx(data, idx_d):
     idx_map = {}
     for j, d in enumerate(idx_d):
@@ -269,17 +338,17 @@ def align_idx(data, idx_d):
 
 
 def analyze_single(code, data, idx_d, days=35, share_data=None):
-    """分析单只ETF的三因子数据（支持份额因子）"""
+    """分析单只ETF的三因子数据（份额不可用时自动二因子回退）"""
     if len(data) < 22:
-        return []
+        return [], False
     
     res = []
     aligned = align_idx(data, idx_d)
-    three_factor_mode = False  # 是否成功启用了三因子
+    three_factor_mode = False
     
     for i in range(max(21, len(data) - days), len(data)):
         d = data[i]
-        v = d["v"] / 10000  # 转为万手
+        v = d["v"] / 10000
         pv = [data[j]["v"] / 10000 for j in range(i - 20, i)]
         ma = sum(pv) / 20
         if ma == 0:
@@ -297,7 +366,6 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
         idchg = 0
         if i < len(aligned) and aligned[i] is not None:
             ii = aligned[i]
-            idchg = 0
             if ii > 0 and idx_d[ii - 1]["c"] > 0:
                 idchg = round((idx_d[ii]["c"] - idx_d[ii - 1]["c"]) / idx_d[ii - 1]["c"] * 100, 2)
             t5i_val = 0
@@ -310,7 +378,7 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
         vp = round(vprob(vr), 1)
         dp = dprob(chg, t5, t5i, vr, idchg)
         
-        # 份额因子
+        # 份额因子 (可用时三因子，不可用时二因子回退)
         sp = None
         sd = None
         if share_data and code in share_data and d["date"] in share_data[code]:
@@ -318,7 +386,6 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
             sd = info.get('delta_pct')
             sp = sprob(sd)
         
-        # 三因子综合概率（有份额数据时） vs 二因子回退
         if sp is not None:
             cp = round(vp * 0.5 + dp * 0.2 + sp * 0.3, 1)
             three_factor_mode = True
@@ -350,6 +417,17 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
 # ============================================================
 # API 路由
 # ============================================================
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
+
+
+@app.route('/')
+def serve_index():
+    """托管前端页面"""
+    return app.send_static_file('index.html')
+
 
 @app.route('/api/health', methods=['GET'])
 def health():
@@ -391,22 +469,32 @@ def get_index_kline():
     })
 
 
+# 内存缓存 (临时, 每次启动重建)
+_SSE_CACHE = {}
+_SZSE_CACHE = {}
+
+
 @app.route('/api/analysis', methods=['GET'])
 def get_analysis():
     """
     三因子完整分析（含份额因子）
-    返回所有7只ETF的三因子数据
+    份额可用 → 三因子 (量能50% + 方向20% + 份额30%)
+    份额不可用 → 二因子优雅降级 (量能70% + 方向30%)
     """
+    codes = list(ETFS.keys())
+    
     # 1. 获取沪深300指数
     idx_data = fetch_kline("sh000300", 60)
     
-    # 1.5 先获取第一个ETF的K线确定target_date，再获取份额
-    first_kline = fetch_kline(list(ETFS.keys())[0], 60)
+    # 2. 确定分析日期
+    first_kline = fetch_kline(codes[0], 60)
     target_date = first_kline[-1]["date"] if first_kline else datetime.now().strftime('%Y-%m-%d')
-    share_data = fetch_share_history(list(ETFS.keys()), target_date, 30)
+    
+    # 3. 获取份额数据 (缓存命中秒出; 未命中~18s加载5天)
+    share_data = get_share_data_with_cache(codes, target_date)
     share_available = len(share_data) > 0
     
-    # 2. 分析每只ETF
+    # 4. 分析每只ETF (份额可用则三因子，否则二因子)
     results = []
     any_three_factor = False
     for code, info in ETFS.items():
@@ -423,7 +511,8 @@ def get_analysis():
             continue
         
         hist, tf = analyze_single(code, kline, idx_data, 35, share_data)
-        if tf: any_three_factor = True
+        if tf:
+            any_three_factor = True
         latest = hist[-1] if hist else None
         
         results.append({
@@ -434,7 +523,7 @@ def get_analysis():
             "latest": latest
         })
     
-    # 3. 计算汇总
+    # 5. 计算汇总
     high_count = sum(1 for r in results if r["latest"] and r["latest"]["cp"] >= 70)
     mid_count = sum(1 for r in results if r["latest"] and 50 <= r["latest"]["cp"] < 70)
     normal_count = sum(1 for r in results if r["latest"] and r["latest"]["cp"] < 50)
@@ -443,17 +532,96 @@ def get_analysis():
     hs300_codes = ["510300", "510310", "510330", "159919"]
     hs300_high = sum(1 for r in results if r["code"] in hs300_codes and r["latest"] and r["latest"]["cp"] >= 50)
     
+    # 6. 综合报告数据
+    # 6a. 成交量排名（按放量倍数降序）
+    volume_ranking = []
+    for r in results:
+        if r["latest"]:
+            vr = r["latest"]["vr"]
+            label = "极端放量" if vr >= 2.0 else ("显著放量" if vr >= 1.5 else ("温和放量" if vr >= 1.0 else "正常"))
+            volume_ranking.append({
+                "code": r["code"], "name": r["name"], "index": r["index"],
+                "vr": vr, "v": r["latest"]["v"], "vma": r["latest"]["vma"],
+                "chg": r["latest"]["chg"], "cp": r["latest"]["cp"],
+                "label": label
+            })
+    volume_ranking.sort(key=lambda x: x["vr"], reverse=True)
+    
+    # 6b. 方向一致性
+    up_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] > 0)
+    down_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] < 0)
+    flat_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] == 0)
+    if up_count >= len(results) * 0.75:
+        direction_consensus = "强一致看多"
+    elif down_count >= len(results) * 0.75:
+        direction_consensus = "强一致看空"
+    elif up_count > down_count:
+        direction_consensus = "偏多"
+    elif down_count > up_count:
+        direction_consensus = "偏空"
+    else:
+        direction_consensus = "分歧"
+    
+    # 6c. 综合评级
+    valid_cps = [r["latest"]["cp"] for r in results if r["latest"]]
+    avg_cp = round(sum(valid_cps) / len(valid_cps), 1) if valid_cps else 0
+    if avg_cp >= 70:
+        rating = "🔴 高确信 — 国家队大概率正在积极增持宽基ETF"
+    elif avg_cp >= 50:
+        rating = "🟡 中等确信 — 值得关注，等待更多确认信号"
+    elif avg_cp >= 30:
+        rating = "🟠 低确信 — 异常放量但无法归因于国家队"
+    else:
+        rating = "⚪ 无信号 — 正常交易，未检测到国家队操作痕迹"
+    
+    # 6d. 30日信号回溯（多ETF同步信号）
+    date_sig = {}
+    for r in results:
+        for h in r.get("history", []):
+            d = h["d"]
+            if d not in date_sig:
+                date_sig[d] = {"total": 0, "high": 0, "mid": 0, "codes": []}
+            date_sig[d]["total"] += 1
+            if h["cp"] >= 70:
+                date_sig[d]["high"] += 1
+                date_sig[d]["codes"].append(f"{r['code']}({h['cp']:.0f}%)")
+            elif h["cp"] >= 50:
+                date_sig[d]["mid"] += 1
+    signal_backtrack = []
+    for d, v in date_sig.items():
+        if v["high"] >= 2 or v["high"] + v["mid"] >= 4:
+            signal_backtrack.append({
+                "date": d,
+                "high": v["high"],
+                "mid": v["mid"],
+                "codes": v["codes"][:5]
+            })
+    signal_backtrack.sort(key=lambda x: x["date"], reverse=True)
+    
     return jsonify({
         "time": datetime.now().isoformat(),
         "target_date": target_date,
         "mode": "three_factor" if any_three_factor else "two_factor",
         "share_available": share_available,
+        "share_status": "available" if share_available else "unavailable",
         "summary": {
             "high": high_count,
             "mid": mid_count,
             "normal": normal_count,
             "error": error_count,
             "hs300_alert": hs300_high
+        },
+        "report": {
+            "rating": rating,
+            "avg_cp": avg_cp,
+            "volume_ranking": volume_ranking,
+            "direction": {
+                "up": up_count,
+                "down": down_count,
+                "flat": flat_count,
+                "consensus": direction_consensus
+            },
+            "signal_backtrack": signal_backtrack[:10]
         },
         "etfs": results
     })
@@ -472,7 +640,7 @@ def get_single_analysis(code):
         return jsonify({"error": f"数据不足({len(kline)}条)"}), 500
     
     target_date = kline[-1]["date"] if kline else datetime.now().strftime('%Y-%m-%d')
-    share_data = fetch_share_history([code], target_date, 30)
+    share_data = fetch_share_history([code], target_date, 5)
     
     hist, three_factor = analyze_single(code, kline, idx_data, 35, share_data)
     
@@ -489,7 +657,7 @@ def get_single_analysis(code):
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("🛡️ ETF三因子 Web 后端服务")
+    print("ETF三因子 Web 后端服务")
     print("=" * 60)
     print(f"API地址: http://localhost:5000")
     print(f"健康检查: http://localhost:5000/api/health")

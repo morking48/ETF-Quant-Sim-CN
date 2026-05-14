@@ -121,27 +121,37 @@ async function doRefresh() {
     showLoading();
     
     try {
-        // 1. 获取ETF列表（用于初始化下拉框等）
+        // 1. 获取ETF列表
         const etfList = await apiGetETFList();
-        
-        // 2. 初始化详情页下拉框
         initDetailSelect(etfList);
         
-        // 3. 获取完整分析数据
-        infoEl.textContent = '正在获取数据...';
+        // 2. 获取完整分析数据（份额缓存命中秒出，未命中~18s）
+        infoEl.textContent = '正在加载分析数据...';
         const analysis = await apiGetAnalysis();
         appData = analysis;
         
-        // 4. 渲染仪表盘
+        // 3. 渲染仪表盘
         renderDashboard(analysis);
         
-        // 5. 初始化历史视图数据（不立即渲染，切到Tab时才渲染）
+        // 4. 初始化历史视图
         initHistory(analysis);
         
-        // 6. 更新模拟盘（结算持仓 + 生成交易建议）
-        updateSimulator(analysis);
+        // 5. 渲染综合报告
+        renderReport(analysis);
         
-        // 7. 更新最后刷新时间
+        // 6. 更新模拟盘
+        try {
+            if (typeof updateSimulator === 'function') {
+                updateSimulator(analysis);
+            }
+        } catch (simErr) {
+            console.warn('模拟盘更新跳过:', simErr.message);
+        }
+        
+        // 7. 数据健康检查
+        validateDataFreshness(analysis);
+        
+        // 8. 更新刷新时间
         const now = new Date();
         infoEl.textContent = `分析日: ${analysis.target_date || '--'} | 刷新: ${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
         updateHeaderTime(
@@ -162,5 +172,82 @@ async function doRefresh() {
         btn.disabled = false;
         btn.innerHTML = '<span class="btn-icon">🔄</span> 刷新数据';
         hideLoading();
+    }
+}
+
+// ========== 数据可靠性校验 ==========
+function validateDataFreshness(analysis) {
+    if (!analysis || !analysis.etfs) return;
+    
+    const targetDate = analysis.target_date;
+    const etfs = analysis.etfs;
+    const issues = [];
+    
+    // 1. 数据新鲜度检查（target_date 距今天 ≤ 2 个自然日）
+    if (targetDate) {
+        const today = new Date();
+        const td = new Date(targetDate);
+        const daysDiff = Math.round((today - td) / (1000 * 60 * 60 * 24));
+        if (daysDiff > 2) {
+            issues.push(`⚠️ 数据滞后${daysDiff}天 (最新: ${targetDate})`);
+            setStatusDot('error');
+        }
+    }
+    
+    // 2. K线数据完整性校验
+    let totalHistory = 0, emptyCount = 0;
+    etfs.forEach(etf => {
+        if (etf.history && etf.history.length > 20) {
+            totalHistory++;
+            // 检查是否有连续价格为0的异常
+            const hasZeroPrice = etf.history.some(h => h.c <= 0);
+            if (hasZeroPrice) {
+                issues.push(`❌ ${etf.code}存在异常价格(≤0)`);
+            }
+        } else {
+            emptyCount++;
+        }
+    });
+    if (emptyCount > 0) {
+        issues.push(`⚠️ ${emptyCount}只ETF数据不足(<20条)`);
+    }
+    
+    // 3. 份额因子可用性（使用后端返回的 share_available 标志）
+    const shareOK = analysis.share_available === true;
+    if (!shareOK) {
+        issues.push('ℹ️ 份额因子不可用(需akshare+盘后数据)');
+    }
+    
+    // 4. 信号合理性校验（避免全是0或全是100）
+    const cps = etfs.filter(e => e.latest).map(e => e.latest.cp);
+    const allZero = cps.length > 0 && cps.every(cp => cp === 0);
+    const allSame = cps.length > 1 && new Set(cps.map(c => Math.round(c))).size === 1;
+    if (allZero) issues.push('🚨 所有ETF综合概率均为0，可能是mock数据');
+    if (allSame) issues.push('⚠️ 所有ETF综合概率一致，数据可能未更新');
+    
+    // 5. 输出健康报告
+    if (issues.length > 0) {
+        console.warn('🔍 数据健康检查:', issues.join(' | '));
+        // 只在有严重问题时弹窗提示
+        if (issues.some(i => i.startsWith('🚨'))) {
+            showError(issues.join('\n'));
+        }
+    } else {
+        console.log('✅ 数据健康检查通过', {
+            目标日期: targetDate,
+            ETF数量: totalHistory,
+            三因子模式: analysis.mode || 'two_factor',
+            份额可用: shareOK
+        });
+    }
+    
+    // 6. 更新页脚状态
+    const footer = document.querySelector('.footer span');
+    if (footer) {
+        const statusIcon = issues.some(i => i.startsWith('🚨')) ? '🔴' : 
+                          issues.some(i => i.startsWith('⚠️')) ? '🟡' : '✅';
+        footer.textContent = `ETF国家队资金监测 · 三因子模型 · 腾讯财经API · v1.0 · ${statusIcon} 校验${
+            issues.length > 0 ? ' (' + issues.length + '项问题)' : '通过'
+        }`;
     }
 }

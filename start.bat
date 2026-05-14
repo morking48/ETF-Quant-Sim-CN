@@ -24,7 +24,7 @@ echo ========================================
 echo.
 
 echo [3/3] 启动浏览器...
-start "" "frontend/index.html"
+start "" "http://localhost:5000"
 
 python "%~dp0backend/server.py"
 

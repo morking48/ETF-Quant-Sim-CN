@@ -3,5 +3,8 @@ __pycache__/
 *.pyo
 .env
 *.log
+logs/
+server_output.log
 .DS_Store
 Thumbs.db
+backend/_share_cache.json

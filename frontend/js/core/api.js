@@ -2,7 +2,7 @@
  * API 调用层
  * 调用 Flask 后端接口
  */
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = '/api';
 
 /**
  * 通用 fetch 封装，含超时和错误处理
@@ -46,8 +46,9 @@ async function apiGetETFList() {
 /**
  * 获取完整三因子分析
  */
-async function apiGetAnalysis() {
-    return apiFetch('/analysis');
+async function apiGetAnalysis(forceShare = false) {
+    const qs = forceShare ? '?force_share=1' : '';
+    return apiFetch(`/analysis${qs}`, 90000);
 }
 
 /**

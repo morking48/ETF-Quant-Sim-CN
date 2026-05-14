@@ -1065,3 +1065,121 @@ body {
     font-size: 12px;
     padding: 20px;
 }
+
+/* ============================================================
+   综合报告 Tab
+   ============================================================ */
+.report-content {
+    padding: 16px 20px;
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.rating-card {
+    background: var(--bg-card);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+}
+.rating-title {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+.rating-value {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.rating-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.report-section {
+    margin-bottom: 24px;
+}
+.report-section-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-default);
+}
+.report-table-wrap {
+    overflow-x: auto;
+}
+
+/* 方向一致性 */
+.direction-card {
+    background: var(--bg-card);
+    border-radius: 8px;
+    padding: 20px 24px;
+}
+.direction-stats {
+    display: flex;
+    gap: 32px;
+    margin-bottom: 12px;
+}
+.direction-stat {
+    text-align: center;
+}
+.direction-num {
+    display: block;
+    font-size: 28px;
+    font-weight: 700;
+}
+.direction-stat.up .direction-num { color: #e74c3c; }
+.direction-stat.down .direction-num { color: #27ae60; }
+.direction-stat.flat .direction-num { color: #95a5a6; }
+.direction-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.direction-consensus {
+    font-size: 14px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-default);
+}
+
+/* 信号回溯 */
+.signal-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-card);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    font-size: 13px;
+}
+.signal-date {
+    font-weight: 600;
+    min-width: 90px;
+}
+.signal-badges {
+    min-width: 60px;
+}
+.signal-codes {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.report-empty {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 20px;
+}
+
+/* 标签 */
+.tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.tag-danger { background: #fde8e8; color: #c0392b; }
+.tag-warning { background: #fef3e2; color: #d35400; }
+.tag-info { background: #e8f4fd; color: #2980b9; }

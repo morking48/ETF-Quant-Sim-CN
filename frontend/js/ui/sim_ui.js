@@ -35,9 +35,9 @@ function showSimConfig() {
         
         <div class="config-section">
             <h4>🎯 交易模式</h4>
-            <label><input type="radio" name="cfg_tradeMode" value="manual" ${config.tradeMode==='manual'?'checked'}> 手动确认（推荐）</label>
-            <label><input type="radio" name="cfg_tradeMode" value="semi" ${config.tradeMode==='semi'?'checked'}> 半自动</label>
-            <label><input type="radio" name="cfg_tradeMode" value="auto" ${config.tradeMode==='auto'?'checked'}> 全自动</label>
+            <label><input type="radio" name="cfg_tradeMode" value="manual" ${config.tradeMode==='manual'?'checked':''}> 手动确认（推荐）</label>
+            <label><input type="radio" name="cfg_tradeMode" value="semi" ${config.tradeMode==='semi'?'checked':''}> 半自动</label>
+            <label><input type="radio" name="cfg_tradeMode" value="auto" ${config.tradeMode==='auto'?'checked':''}> 全自动</label>
         </div>
         
         <div class="config-section">
