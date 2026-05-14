@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1440, initial-scale=1">
+    <title>ETF三因子监测系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- ECharts CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+    <!-- ========== 顶部导航 ========== -->
+    <header class="header">
+        <div class="header-left">
+            <h1>🛡️ ETF三因子监测系统</h1>
+            <span class="header-sub" id="headerModelMode">量能50% + 方向20% + 份额30%</span>
+        </div>
+        <div class="header-right">
+            <span class="header-status" id="statusDot"></span>
+            <span class="header-time" id="headerTime">--</span>
+            <span class="header-date" id="headerDate">--</span>
+        </div>
+    </header>
+
+    <!-- ========== 顶部栏：信号汇总 + 刷新 ========== -->
+    <div class="topbar">
+        <div class="topbar-stats" id="summaryCards">
+            <!-- 动态填充 -->
+        </div>
+        <button class="btn-refresh" id="btnRefresh" onclick="doRefresh()">
+            <span class="btn-icon">🔄</span> 刷新数据
+        </button>
+        <span class="refresh-info" id="refreshInfo">等待首次加载...</span>
+    </div>
+
+    <!-- ========== Tab 导航 ========== -->
+    <nav class="tab-nav" id="tabNav">
+        <button class="tab-btn active" data-tab="dashboard">📊 仪表盘</button>
+        <button class="tab-btn" data-tab="detail">📈 详情</button>
+        <button class="tab-btn" data-tab="history">📅 历史</button>
+        <button class="tab-btn" data-tab="simulator">💰 模拟盘</button>
+    </nav>
+
+    <!-- ========== Tab 内容区域 ========== -->
+    <main class="tab-content">
+        <!-- Tab 1: 仪表盘 -->
+        <section class="tab-panel active" id="panel-dashboard">
+            <div class="dashboard-grid" id="dashboardGrid">
+                <!-- 动态填充7张ETF卡片 -->
+            </div>
+        </section>
+
+        <!-- Tab 2: 详情 -->
+        <section class="tab-panel" id="panel-detail">
+            <div class="detail-header">
+                <select class="detail-select" id="detailSelect">
+                    <!-- 动态填充ETF选项 -->
+                </select>
+                <span class="detail-name" id="detailName"></span>
+                <span class="detail-index" id="detailIndex"></span>
+            </div>
+            <div class="detail-content">
+                <!-- 综合概率大卡片 -->
+                <div class="detail-prob-card" id="detailProbCard">
+                    <!-- 动态填充 -->
+                </div>
+                <!-- 三因子拆解环形图（三列独立） -->
+                <div class="gauge-row">
+                    <div class="chart-box chart-gauge" id="chartGaugeVp"></div>
+                    <div class="chart-box chart-gauge" id="chartGaugeDp"></div>
+                    <div class="chart-box chart-gauge" id="chartGaugeCp"></div>
+                </div>
+                <!-- 趋势折线图（全宽） -->
+                <div class="chart-box chart-box-full" id="chartTrend" style="height:340px;"></div>
+                <!-- 历史数据表格 -->
+                <div class="detail-table-wrap">
+                    <table class="data-table" id="detailTable">
+                        <thead>
+                            <tr>
+                                <th>日期</th>
+                                <th>收盘价</th>
+                                <th>涨跌%</th>
+                                <th>成交量(万手)</th>
+                                <th>20日均量</th>
+                                <th>倍量</th>
+                                <th>量能P</th>
+                                <th>方向P</th>
+                                <th>份额P</th>
+                                <th>综合P</th>
+                                <th>信号</th>
+                            </tr>
+                        </thead>
+                        <tbody id="detailTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tab 3: 历史 -->
+        <section class="tab-panel" id="panel-history">
+            <div class="history-header">
+                <button class="btn-date-nav" id="btnPrevDate">◀</button>
+                <span class="history-date" id="historyDate">--</span>
+                <button class="btn-date-nav" id="btnNextDate">▶</button>
+                <span class="history-summary" id="historySummary"></span>
+            </div>
+            <div class="history-content">
+                <!-- 热力图 -->
+                <div class="chart-box chart-box-full" id="chartHeatmap" style="height:420px;"></div>
+                <!-- 当日信号详情 -->
+                <div class="history-detail-list" id="historyDetailList">
+                    <!-- 动态填充 -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Tab 4: 模拟盘 -->
+        <section class="tab-panel" id="panel-simulator">
+            <div class="sim-content">
+                <!-- 资产总览卡片 -->
+                <div class="sim-overview" id="simOverview">
+                    <!-- 动态填充 -->
+                </div>
+                <!-- 收益曲线 -->
+                <div class="chart-box chart-box-full" id="chartSimEquity" style="height:320px;"></div>
+                <!-- 两列布局：持仓 + 交易建议 -->
+                <div class="sim-two-col">
+                    <div class="sim-col">
+                        <h3 class="sim-section-title">📋 当前持仓</h3>
+                        <div class="sim-positions" id="simPositions">
+                            <!-- 动态填充 -->
+                        </div>
+                    </div>
+                    <div class="sim-col">
+                        <h3 class="sim-section-title">💡 交易建议</h3>
+                        <div class="sim-suggestions" id="simSuggestions">
+                            <!-- 动态填充 -->
+                        </div>
+                    </div>
+                </div>
+                <!-- 交易记录 -->
+                <h3 class="sim-section-title">📜 交易记录（最近10条）</h3>
+                <div class="sim-trades" id="simTrades">
+                    <!-- 动态填充 -->
+                </div>
+                <!-- 统计面板 -->
+                <div class="sim-stats" id="simStats">
+                    <!-- 动态填充 -->
+                </div>
+                <!-- 操作按钮 -->
+                <div class="sim-actions">
+                    <button class="btn-sim btn-config" onclick="showSimConfig()">⚙️ 策略配置</button>
+                    <button class="btn-sim btn-export" onclick="exportSimCSV()">📥 导出CSV</button>
+                    <button class="btn-sim btn-export" onclick="exportSimJSON()">📊 导出JSON</button>
+                    <button class="btn-sim btn-reset" onclick="resetSimAndUI()">🔄 重置模拟</button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ========== 底部 ========== -->
+    <footer class="footer">
+        <span>ETF国家队资金监测 · 三因子模型 · 腾讯财经API · v1.0</span>
+    </footer>
+
+    <!-- ========== JS 脚本 ========== -->
+    <script src="js/utils/date.js"></script>
+    <script src="js/utils/format.js"></script>
+    <script src="js/core/api.js"></script>
+    <script src="js/core/engine.js"></script>
+    <script src="js/ui/components.js"></script>
+    <script src="js/ui/dashboard.js"></script>
+    <script src="js/ui/detail.js"></script>
+    <script src="js/ui/history.js"></script>
+    <script src="js/utils/statistics.js"></script>
+    <script src="js/core/simulator.js"></script>
+    <script src="js/ui/sim_ui.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

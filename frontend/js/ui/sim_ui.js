@@ -1,0 +1,458 @@
+/**
+ * Tab4: 模拟盘视图
+ * 资产总览 + 收益曲线 + 持仓/交易建议 + 交易记录 + 策略配置
+ */
+
+let simEquityChart = null;
+
+// ========== 策略配置面板 ==========
+function showSimConfig() {
+    const config = getSimConfig();
+    const html = `
+    <div class="config-overlay" id="configOverlay" onclick="if(event.target===this) hideSimConfig()">
+    <div class="config-panel">
+        <h3>⚙️ 模拟盘策略配置</h3>
+        
+        <div class="config-section">
+            <h4>💰 资金设置</h4>
+            <label>初始资金(元) <input id="cfg_capital" type="number" value="${config.initialCapital}" step="10000" min="5000"></label>
+        </div>
+        
+        <div class="config-section">
+            <h4>📊 仓位控制</h4>
+            <label>首次建仓比例(%) <input id="cfg_positionRatio" type="number" value="${Math.round(config.positionRatio * 100)}" min="10" max="80"></label>
+            <label>加仓比例(%) <input id="cfg_addRatio" type="number" value="${Math.round(config.addRatio * 100)}" min="5" max="50"></label>
+            <label>单只ETF上限(%) <input id="cfg_maxSinglePct" type="number" value="${Math.round(config.maxSinglePct * 100)}" min="20" max="100"></label>
+            <label>总仓位上限(%) <input id="cfg_maxTotalPct" type="number" value="${Math.round(config.maxTotalPct * 100)}" min="30" max="100"></label>
+        </div>
+        
+        <div class="config-section">
+            <h4>🛑 止损设置</h4>
+            <label>硬止损(%) <input id="cfg_stopLossPct" type="number" value="${Math.round(config.stopLossPct * -100)}" min="2" max="20"> (负数)</label>
+            <label>时间止损(天) <input id="cfg_timeStopDays" type="number" value="${config.timeStopDays}" min="3" max="30"></label>
+            <label>信号卖出阈值(%) <input id="cfg_signalSellPct" type="number" value="${Math.round(config.signalSellPct * 100)}" min="10" max="60"></label>
+        </div>
+        
+        <div class="config-section">
+            <h4>🎯 交易模式</h4>
+            <label><input type="radio" name="cfg_tradeMode" value="manual" ${config.tradeMode==='manual'?'checked'}> 手动确认（推荐）</label>
+            <label><input type="radio" name="cfg_tradeMode" value="semi" ${config.tradeMode==='semi'?'checked'}> 半自动</label>
+            <label><input type="radio" name="cfg_tradeMode" value="auto" ${config.tradeMode==='auto'?'checked'}> 全自动</label>
+        </div>
+        
+        <div class="config-section">
+            <h4>💸 手续费率</h4>
+            <label>手续费(万分之) <input id="cfg_feeRate" type="number" value="${Math.round(config.feeRate * 10000)}" min="1" max="10"></label>
+        </div>
+        
+        <div class="config-actions">
+            <button class="btn-sim btn-save" onclick="saveSimConfigFromUI()">💾 保存配置</button>
+            <button class="btn-sim btn-reset" onclick="resetConfigFromUI()">↩ 恢复默认</button>
+            <button class="btn-sim btn-cancel" onclick="hideSimConfig()">✖ 取消</button>
+        </div>
+    </div>
+    </div>`;
+    
+    document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function hideSimConfig() {
+    const el = document.getElementById('configOverlay');
+    if (el) el.remove();
+}
+
+function saveSimConfigFromUI() {
+    const config = {
+        initialCapital: +document.getElementById('cfg_capital').value,
+        positionRatio: (+document.getElementById('cfg_positionRatio').value) / 100,
+        addRatio: (+document.getElementById('cfg_addRatio').value) / 100,
+        maxSinglePct: (+document.getElementById('cfg_maxSinglePct').value) / 100,
+        maxTotalPct: (+document.getElementById('cfg_maxTotalPct').value) / 100,
+        stopLossPct: -(+(document.getElementById('cfg_stopLossPct').value)) / 100,
+        timeStopDays: +document.getElementById('cfg_timeStopDays').value,
+        signalSellPct: (+document.getElementById('cfg_signalSellPct').value) / 100,
+        tradeMode: document.querySelector('input[name="cfg_tradeMode"]:checked').value,
+        feeRate: (+document.getElementById('cfg_feeRate').value) / 10000,
+    };
+    saveSimConfig({...getSimConfig(), ...config});
+    hideSimConfig();
+    renderSimulator();
+}
+
+function resetConfigFromUI() {
+    resetSimConfig();
+    const config = getSimConfig();
+    document.getElementById('cfg_capital').value = config.initialCapital;
+    document.getElementById('cfg_positionRatio').value = Math.round(config.positionRatio * 100);
+    document.getElementById('cfg_addRatio').value = Math.round(config.addRatio * 100);
+    document.getElementById('cfg_maxSinglePct').value = Math.round(config.maxSinglePct * 100);
+    document.getElementById('cfg_maxTotalPct').value = Math.round(config.maxTotalPct * 100);
+    document.getElementById('cfg_stopLossPct').value = Math.round(config.stopLossPct * -100);
+    document.getElementById('cfg_timeStopDays').value = config.timeStopDays;
+    document.getElementById('cfg_signalSellPct').value = Math.round(config.signalSellPct * 100);
+    document.querySelector('input[name="cfg_tradeMode"][value="manual"]').checked = true;
+    document.getElementById('cfg_feeRate').value = Math.round(config.feeRate * 10000);
+}
+
+// ========== 主视图渲染 ==========
+function renderSimulator() {
+    const config = getSimConfig();
+    const trades = getSimTrades();
+    const snapshots = getSimSnapshots();
+    const positions = getSimPositions();
+    const lastSnapshot = snapshots[snapshots.length - 1];
+    
+    const cash = lastSnapshot ? lastSnapshot.cash : config.initialCapital;
+    const marketValue = positions.reduce((s, p) => s + (p.marketValue || 0), 0);
+    const totalValue = cash + marketValue;
+    const totalReturn = calcTotalReturn(totalValue, config.initialCapital);
+    const winRate = calcWinRate(trades);
+    const maxDD = calcMaxDrawdown(snapshots);
+    const sharpe = calcSharpe(snapshots);
+    
+    // 渲染资产卡片
+    renderSimOverview(totalValue, cash, marketValue, totalReturn, winRate, maxDD, sharpe, trades.length);
+    
+    // 渲染收益曲线
+    renderSimEquityChart(snapshots);
+    
+    // 渲染持仓
+    renderSimPositions(positions, cash);
+    
+    // 渲染交易建议
+    renderSimSuggestions();
+    
+    // 渲染交易记录
+    renderSimTrades(trades);
+    
+    // 更新统计面板
+    renderSimStats(totalValue, totalReturn, winRate, maxDD, sharpe);
+}
+
+function renderSimOverview(totalValue, cash, mv, totalReturn, winRate, maxDD, sharpe, tradeCount) {
+    const container = document.getElementById('simOverview');
+    if (!container) return;
+    
+    const retColor = totalReturn >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
+    const retSign = totalReturn >= 0 ? '+' : '';
+    
+    container.innerHTML = `
+        <div class="sim-overview-card sim-ov-main">
+            <div class="sim-ov-value" style="color:${retColor}">¥${formatNumber(totalValue, 2)}</div>
+            <div class="sim-ov-label">总资产 <span style="color:${retColor}">${retSign}${totalReturn}%</span></div>
+        </div>
+        <div class="sim-overview-card">
+            <div class="sim-ov-value">¥${formatNumber(cash, 2)}</div>
+            <div class="sim-ov-label">现金余额</div>
+        </div>
+        <div class="sim-overview-card">
+            <div class="sim-ov-value">¥${formatNumber(mv, 2)}</div>
+            <div class="sim-ov-label">持仓市值</div>
+        </div>
+        <div class="sim-overview-card">
+            <div class="sim-ov-value">${tradeCount}次</div>
+            <div class="sim-ov-label">累计交易</div>
+        </div>
+        <div class="sim-overview-card">
+            <div class="sim-ov-value" style="color:${winRate.winRate >= 50 ? 'var(--signal-low)' : 'var(--signal-mid)'}">${winRate.winRate}%</div>
+            <div class="sim-ov-label">胜率 ${winRate.winCount}/${winRate.totalCount}</div>
+        </div>
+        <div class="sim-overview-card">
+            <div class="sim-ov-value" style="color:var(--signal-high)">-${maxDD.maxDrawdownPct}%</div>
+            <div class="sim-ov-label">最大回撤</div>
+        </div>
+    `;
+}
+
+function renderSimEquityChart(snapshots) {
+    const dom = document.getElementById('chartSimEquity');
+    if (!dom) return;
+    
+    if (!simEquityChart) {
+        simEquityChart = echarts.init(dom);
+        window.addEventListener('resize', () => simEquityChart && simEquityChart.resize());
+    }
+    
+    if (!snapshots || snapshots.length < 2) {
+        simEquityChart.setOption({
+            title: { text: '等待交易数据...', left: 'center', top: 'center', textStyle: { color: '#64748b' } }
+        });
+        return;
+    }
+    
+    const dates = snapshots.map(s => s.date);
+    const totalValues = snapshots.map(s => s.totalValue);
+    // 基准简单模拟：假设初始100000
+    const config = getSimConfig();
+    const benchmarkValues = snapshots.map((s, i) => {
+        const benchPct = s.benchmarkPct || 0;
+        return config.initialCapital * (1 + benchPct / 100);
+    });
+    
+    const option = {
+        backgroundColor: 'transparent',
+        title: { text: '收益曲线（模拟权益 vs 基准）', left: 'center', top: 8,
+            textStyle: { color: '#8899aa', fontSize: 13, fontWeight: 600 } },
+        tooltip: { trigger: 'axis', backgroundColor: 'rgba(20,27,38,0.95)', 
+            borderColor: 'rgba(56,189,248,0.2)', textStyle: { color: '#e0e6f0', fontSize: 12 } },
+        legend: { data: ['模拟权益', '沪深300基准(简)'], bottom: 0,
+            textStyle: { color: '#8899aa', fontSize: 11 } },
+        grid: { top: 40, right: 30, bottom: 30, left: 70 },
+        xAxis: { type: 'category', data: dates, axisLabel: { color: '#64748b', fontSize: 10, rotate: 45 } },
+        yAxis: { type: 'value', axisLabel: { color: '#64748b', fontSize: 10, formatter: '¥{value}' },
+            splitLine: { lineStyle: { color: 'rgba(56,189,248,0.06)' } } },
+        series: [
+            { name: '模拟权益', type: 'line', data: totalValues, smooth: true,
+                lineStyle: { color: '#38bdf8', width: 2.5 }, itemStyle: { color: '#38bdf8' },
+                symbol: 'circle', symbolSize: 4,
+                areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                    colorStops: [{offset:0, color:'rgba(56,189,248,0.2)'},{offset:1, color:'rgba(56,189,248,0)'}] } } },
+            { name: '沪深300基准(简)', type: 'line', data: benchmarkValues, smooth: true,
+                lineStyle: { color: '#64748b', width: 1.5, type: 'dashed' }, itemStyle: { color: '#64748b' },
+                symbol: 'none' }
+        ]
+    };
+    simEquityChart.setOption(option, true);
+}
+
+function renderSimPositions(positions, cash) {
+    const container = document.getElementById('simPositions');
+    if (!container) return;
+    
+    if (positions.length === 0) {
+        container.innerHTML = `<div class="sim-empty">暂无持仓</div>
+        <div class="sim-cash">💵 可用现金：¥${formatNumber(cash, 2)}</div>`;
+        return;
+    }
+    
+    container.innerHTML = positions.map(p => {
+        const si = getSignalInfo(p.cp || 0);
+        const pnlColor = (p.pnl || 0) >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
+        const pnlSign = (p.pnl || 0) >= 0 ? '+' : '';
+        return `
+        <div class="sim-position-item">
+            <div class="sim-pos-header">
+                <span class="sim-pos-code">${p.code}</span>
+                <span class="sim-pos-name">${p.name}</span>
+            </div>
+            <div class="sim-pos-detail">
+                <div>成本 ¥${(p.costPrice||0).toFixed(3)} → 现价 ¥${(p.currentPrice||0).toFixed(3)}</div>
+                <div>持有 ${(p.shares||0)}份 | 市值 ¥${formatNumber(p.marketValue||0,2)}</div>
+                <div style="color:${pnlColor};font-weight:700">
+                    ${pnlSign}¥${formatNumber(p.pnl||0,2)} (${pnlSign}${(p.pnlPct||0).toFixed(1)}%)
+                </div>
+            </div>
+            <div class="sim-pos-footer">
+                <span>持有${p.holdDays||0}天</span>
+            </div>
+        </div>`;
+    }).join('') + `<div class="sim-cash">💵 可用现金：¥${formatNumber(cash, 2)}</div>`;
+}
+
+function renderSimSuggestions() {
+    const container = document.getElementById('simSuggestions');
+    if (!container) return;
+    
+    if (!window._lastSimSuggestions || window._lastSimSuggestions.length === 0) {
+        container.innerHTML = '<div class="sim-empty">暂无交易建议（刷新数据后生成）</div>';
+        return;
+    }
+    
+    const config = getSimConfig();
+    
+    container.innerHTML = window._lastSimSuggestions.map(s => {
+        const isBuy = s.action === 'BUY';
+        const actionColor = isBuy ? 'var(--signal-low)' : 'var(--signal-high)';
+        const actionLabel = isBuy ? '买入' : '卖出';
+        
+        return `
+        <div class="sim-suggestion-item" style="border-left: 4px solid ${actionColor}">
+            <div class="sim-sug-header">
+                <span style="color:${actionColor};font-weight:700">${isBuy?'🟢':'🔴'} ${actionLabel}</span>
+                <span>${s.code} ${s.name || ''}</span>
+                ${s.urgent ? '<span style="color:var(--signal-high);font-size:11px">‼紧急</span>' : ''}
+            </div>
+            <div class="sim-sug-reason">${s.reason}</div>
+            ${config.tradeMode !== 'manual' ? '' : 
+                `<button class="btn-sim btn-exec" onclick="execSuggestion('${s.action}','${s.code}','${s.name}','${s.reason}')">✅ 确认执行</button>`}
+        </div>`;
+    }).join('');
+}
+
+function renderSimTrades(trades) {
+    const container = document.getElementById('simTrades');
+    if (!container) return;
+    
+    if (trades.length === 0) {
+        container.innerHTML = '<div class="sim-empty">暂无交易记录</div>';
+        return;
+    }
+    
+    const recent = trades.slice(-10).reverse();
+    
+    container.innerHTML = recent.map(t => {
+        const isBuy = t.action === 'BUY';
+        const actionColor = isBuy ? 'var(--signal-low)' : 'var(--signal-high)';
+        const actionLabel = isBuy ? '买入' : '卖出';
+        const pnlStr = t.pnl != null ? 
+            `<span style="color:${t.pnl>=0?'var(--signal-low)':'var(--signal-high)'}">${t.pnl>=0?'+':''}¥${formatNumber(t.pnl,2)}</span>` : '';
+        
+        return `
+        <div class="sim-trade-item">
+            <div class="sim-trade-header">
+                <span>${t.date}</span>
+                <span style="color:${actionColor};font-weight:700">${actionLabel}</span>
+                <span>${t.code}</span>
+            </div>
+            <div class="sim-trade-detail">
+                <span>${t.shares}份 @ ¥${t.price.toFixed(3)}</span>
+                <span>¥${formatNumber(t.amount,2)}</span>
+                ${pnlStr}
+            </div>
+            <div class="sim-trade-signal">信号: ${t.signal || '-'}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderSimStats(totalValue, totalReturn, winRate, maxDD, sharpe) {
+    const container = document.getElementById('simStats');
+    if (!container) return;
+    const config = getSimConfig();
+    
+    container.innerHTML = `
+        <div class="sim-stat-item"><span>累计收益</span><span style="color:${totalReturn>=0?'var(--signal-low)':'var(--signal-high)'}">${totalReturn>=0?'+':''}${totalReturn}%</span></div>
+        <div class="sim-stat-item"><span>胜率</span><span>${winRate.winRate}%</span></div>
+        <div class="sim-stat-item"><span>最大回撤</span><span style="color:var(--signal-high)">${maxDD.maxDrawdownPct}%</span></div>
+        <div class="sim-stat-item"><span>夏普比</span><span>${sharpe}</span></div>
+        <div class="sim-stat-item"><span>已平仓</span><span>${winRate.winCount}盈/${winRate.totalCount}总</span></div>
+    `;
+}
+
+// ========== 交易执行 ==========
+function execSuggestion(action, code, name, reason) {
+    if (!appData || !appData.etfs) return;
+    
+    const etfData = appData.etfs.find(e => e.code === code);
+    if (!etfData || !etfData.latest) return;
+    
+    const price = etfData.latest.c;
+    const date = appData.target_date || new Date().toISOString().slice(0, 10);
+    
+    const suggestion = { action, code, name, reason };
+    const result = executeTrade(suggestion, price, date);
+    
+    if (result) {
+        renderSimulator();
+    } else {
+        alert('交易执行失败：资金不足或数据异常');
+    }
+}
+
+// ========== 导出功能 ==========
+function exportSimCSV() {
+    const trades = getSimTrades();
+    if (trades.length === 0) { alert('无交易记录可导出'); return; }
+    
+    const header = '日期,代码,名称,操作,价格,份数,金额,手续费,盈亏,信号原因\n';
+    const rows = trades.map(t => 
+        `${t.date},${t.code},${t.name},${t.action},${t.price},${t.shares},${t.amount},${t.fee},${t.pnl||''},"${t.signal||''}"`
+    ).join('\n');
+    
+    const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `ETF模拟交易记录_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function exportSimJSON() {
+    const config = getSimConfig();
+    const trades = getSimTrades();
+    const snapshots = getSimSnapshots();
+    const positions = getSimPositions();
+    const winRate = calcWinRate(trades);
+    const maxDD = calcMaxDrawdown(snapshots);
+    const sharpe = calcSharpe(snapshots);
+    const lastSnap = snapshots[snapshots.length - 1];
+    const totalValue = lastSnap ? lastSnap.totalValue : config.initialCapital;
+    
+    const summary = {
+        exportTime: new Date().toISOString(),
+        config: config,
+        stats: {
+            initialCapital: config.initialCapital,
+            finalValue: totalValue,
+            totalReturnPct: calcTotalReturn(totalValue, config.initialCapital),
+            maxDrawdownPct: maxDD.maxDrawdownPct,
+            sharpeRatio: sharpe,
+            winRate: winRate.winRate,
+            totalTrades: trades.length,
+            winCount: winRate.winCount,
+        },
+        positions: positions,
+        trades: trades,
+        snapshots: snapshots,
+    };
+    
+    const blob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `ETF模拟统计_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function resetSimAndUI() {
+    if (confirm('确定重置模拟盘吗？所有持仓和交易记录将被清空。')) {
+        resetSimulation();
+        initSimulator();
+        renderSimulator();
+    }
+}
+
+// ========== 从主刷新流程调用 ==========
+function updateSimulator(analysisData) {
+    if (!analysisData || !analysisData.etfs) return;
+    
+    const config = getSimConfig();
+    const date = analysisData.target_date || new Date().toISOString().slice(0, 10);
+    
+    // 初始化
+    const { positions } = initSimulator();
+    
+    // 结算持仓
+    const settlement = settleHoldings(analysisData, date);
+    const cash = settlement.cash || config.initialCapital;
+    
+    // 检查信号
+    const sellSuggestions = checkSellSignals(positions, analysisData);
+    const buySuggestions = checkBuySignals(analysisData, cash, positions);
+    
+    const allSuggestions = [...sellSuggestions, ...buySuggestions];
+    // 按优先级排序
+    allSuggestions.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    
+    window._lastSimSuggestions = allSuggestions;
+    
+    // 全自动模式自动执行
+    if (config.tradeMode === 'auto' && allSuggestions.length > 0) {
+        for (const sug of allSuggestions) {
+            const etfData = analysisData.etfs.find(e => e.code === sug.code);
+            if (etfData && etfData.latest) {
+                executeTrade(sug, etfData.latest.c, date);
+            }
+        }
+    } else if (config.tradeMode === 'semi') {
+        // 半自动：卖出自动执行
+        for (const sug of sellSuggestions) {
+            const etfData = analysisData.etfs.find(e => e.code === sug.code);
+            if (etfData && etfData.latest) {
+                executeTrade(sug, etfData.latest.c, date);
+            }
+        }
+    }
+    
+    // 渲染
+    renderSimulator();
+}
