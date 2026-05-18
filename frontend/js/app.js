@@ -7,6 +7,7 @@
 let appData = null;
 let currentTab = 'dashboard';
 let isRefreshing = false;
+let lastRefreshMinute = -1;
 
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', async () => {
@@ -23,6 +24,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // 自动执行首次分析
     await doRefresh();
+    
+    // 开启定时自动刷新
+    initAutoRefresh();
 });
 
 // ========== Tab 路由 ==========
@@ -105,6 +109,34 @@ async function checkBackend() {
         showError(`无法连接后端服务: ${err.message}。请确保已启动 python backend/server.py`);
         console.error('❌ 后端连接失败:', err);
     }
+}
+
+// ========== 自动刷新 ==========
+function initAutoRefresh() {
+    setInterval(() => {
+        const now = new Date();
+        const day = now.getDay();
+        
+        // 过滤周末
+        if (day === 0 || day === 6) return;
+
+        const h = now.getHours();
+        const m = now.getMinutes();
+
+        // 指定刷新时间：09:30, 10:00, 10:30, 11:00, 11:30, 13:00, 13:30, 14:00, 14:30, 15:00, 15:30, 16:00
+        const targetTimes = [
+            [9, 30], [10, 0], [10, 30], [11, 0], [11, 30],
+            [13, 0], [13, 30], [14, 0], [14, 30], [15, 0], [15, 30], [16, 0]
+        ];
+
+        const isTarget = targetTimes.some(t => t[0] === h && t[1] === m);
+
+        if (isTarget && lastRefreshMinute !== m) {
+            lastRefreshMinute = m;
+            console.log(`[自动刷新] 触发时间: ${h}:${m.toString().padStart(2, '0')}`);
+            doRefresh();
+        }
+    }, 10000); // 每10秒检测一次
 }
 
 // ========== 数据刷新 ==========

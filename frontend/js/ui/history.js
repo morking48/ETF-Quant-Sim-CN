@@ -87,6 +87,15 @@ function renderHeatmap() {
     if (!heatmapChart) {
         heatmapChart = echarts.init(dom);
         window.addEventListener('resize', () => heatmapChart && heatmapChart.resize());
+        
+        // 支持点击热力图切换日期
+        heatmapChart.on('click', function(params) {
+            const date = recentDates[params.value[0]];
+            if (date && date !== historyCurrentDate) {
+                historyCurrentDate = date;
+                renderHistory();
+            }
+        });
     }
     
     if (!historyData || !historyData.etfs || historyData.etfs.length === 0) {

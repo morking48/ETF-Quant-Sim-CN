@@ -1,0 +1,32 @@
+{
+  "config": {
+    "initialCapital": 100000,
+    "positionRatio": 0.3,
+    "addRatio": 0.2,
+    "maxSinglePct": 0.5,
+    "maxTotalPct": 0.8,
+    "stopLossPct": -0.05,
+    "timeStopDays": 10,
+    "signalSellPct": 0.4,
+    "tradeMode": "manual",
+    "feeRate": 0.0003,
+    "strategy": "signal_band"
+  },
+  "trades": [],
+  "snapshots": [
+    {
+      "date": "init",
+      "cash": 100000,
+      "marketValue": 0,
+      "totalValue": 100000,
+      "dailyPnl": 0,
+      "totalPnl": 0,
+      "pnlPct": 0,
+      "benchmarkPct": 0,
+      "tradeCount": 0,
+      "winCount": 0
+    }
+  ],
+  "positions": [],
+  "savedAt": "2026-05-18T01:14:00.436Z"
+}

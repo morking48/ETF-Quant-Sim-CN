@@ -233,13 +233,17 @@ function checkBuySignals(analysisData, cash, positions) {
     const highSignals = analysisData.etfs.filter(e => e.latest && e.latest.cp >= 70);
     const midSignals = analysisData.etfs.filter(e => e.latest && e.latest.cp >= 50 && e.latest.cp < 70);
     
-    // 策略1: 信号波段 — ≥3只同时高确信 或 2只沪深300同时高确信
+    // 策略: 信号波段 — 多ETF共振优先，单只高确信也可触发
     const hs300Codes = ['510300', '510310', '510330', '159919'];
     const hs300High = highSignals.filter(e => hs300Codes.includes(e.code));
     
+    // 按综合概率降序排列
+    highSignals.sort((a, b) => b.latest.cp - a.latest.cp);
+    midSignals.sort((a, b) => b.latest.cp - a.latest.cp);
+    
     if (highSignals.length >= 3) {
         // 多ETF共振 → 买入信号最强的那只
-        const best = highSignals.sort((a, b) => b.latest.cp - a.latest.cp)[0];
+        const best = highSignals[0];
         if (!positions.find(p => p.code === best.code)) {
             suggestions.push({
                 code: best.code,
@@ -262,25 +266,43 @@ function checkBuySignals(analysisData, cash, positions) {
             });
         }
     } else if (highSignals.length >= 1) {
+        // 单只高确信也可建议（降低门槛）
         const best = highSignals[0];
         if (!positions.find(p => p.code === best.code)) {
             suggestions.push({
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
-                reason: `单只高确信: 综合概率${best.latest.cp.toFixed(0)}%`,
+                reason: `高确信信号: 综合概率${best.latest.cp.toFixed(0)}%`,
                 priority: 3,
             });
         }
-    } else if (midSignals.length >= 2) {
-        const best = midSignals.sort((a, b) => b.latest.cp - a.latest.cp)[0];
-        if (!positions.find(p => p.code === best.code)) {
+    }
+    
+    // 中等信号：≥2只同时触发也建议
+    if (midSignals.length >= 2) {
+        const best = midSignals[0];
+        if (!positions.find(p => p.code === best.code) && !suggestions.find(s => s.code === best.code)) {
             suggestions.push({
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
                 reason: `中等信号聚集: ${midSignals.length}只同时触发`,
                 priority: 4,
+            });
+        }
+    }
+    
+    // 单只中等信号且未持仓也可提示（最宽松条件）
+    if (suggestions.length === 0 && midSignals.length >= 1) {
+        const best = midSignals[0];
+        if (!positions.find(p => p.code === best.code)) {
+            suggestions.push({
+                code: best.code,
+                name: best.name,
+                action: 'BUY',
+                reason: `中等信号: 综合概率${best.latest.cp.toFixed(0)}%，值得关注`,
+                priority: 5,
             });
         }
     }
