@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=1440, initial-scale=1">
     <title>ETF三因子监测系统</title>
     <link rel="stylesheet" href="css/style.css">
-    <!-- ECharts CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <!-- ECharts 本地加载 -->
+    <script src="js/lib/echarts.min.js"></script>
 </head>
 <body>
     <!-- ========== 顶部导航 ========== -->
@@ -16,11 +16,17 @@
             <span class="header-sub" id="headerModelMode">量能50% + 方向20% + 份额30%</span>
         </div>
         <div class="header-right">
+            <span class="header-signals" id="headerSignals" style="display:none;"></span>
             <span class="header-status" id="statusDot"></span>
             <span class="header-time" id="headerTime">--</span>
             <span class="header-date" id="headerDate">--</span>
         </div>
     </header>
+
+    <!-- ========== 策略信号看板 ========== -->
+    <div class="signal-dashboard" id="signalDashboard" style="display:none;">
+        <!-- 动态填充：跨策略强度对比 + 推荐 -->
+    </div>
 
     <!-- ========== 顶部栏：信号汇总 + 刷新 ========== -->
     <div class="topbar">
@@ -207,16 +213,25 @@
     <!-- ========== JS 脚本 ========== -->
     <script src="js/utils/date.js"></script>
     <script src="js/utils/format.js"></script>
+    <script src="js/utils/statistics.js"></script>
     <script src="js/core/api.js"></script>
+    <script src="js/strategies/base.js"></script>
+    <script src="js/strategies/registry.js"></script>
+    <script src="js/strategies/three_factor/config.js"></script>
+    <script src="js/strategies/three_factor/factors.js"></script>
+    <script src="js/strategies/three_factor/index.js"></script>
+    <script src="js/strategies/grid/config.js"></script>
+    <script src="js/strategies/grid/index.js"></script>
     <script src="js/core/engine.js"></script>
+    <script src="js/core/simulator.js"></script>
     <script src="js/ui/components.js"></script>
     <script src="js/ui/dashboard.js"></script>
+    <script src="js/ui/grid_dashboard.js"></script>
     <script src="js/ui/detail.js"></script>
     <script src="js/ui/history.js"></script>
-    <script src="js/utils/statistics.js"></script>
-    <script src="js/core/simulator.js"></script>
     <script src="js/ui/sim_ui.js"></script>
     <script src="js/ui/report.js"></script>
+    <script src="js/ui/strategy_selector.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

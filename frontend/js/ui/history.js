@@ -84,6 +84,7 @@ function renderHeatmap() {
     const dom = document.getElementById('chartHeatmap');
     if (!dom) return;
     
+    if (typeof echarts === 'undefined') return;
     if (!heatmapChart) {
         heatmapChart = echarts.init(dom);
         window.addEventListener('resize', () => heatmapChart && heatmapChart.resize());

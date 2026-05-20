@@ -71,3 +71,24 @@ async function apiGetKline(code, limit = 60) {
 async function apiGetIndexKline(limit = 60) {
     return apiFetch(`/index_kline?limit=${limit}`);
 }
+
+/**
+ * 获取网格策略分析数据
+ */
+async function apiGetGridAnalysis(days = 250) {
+    return apiFetch(`/strategy/grid/analyze?days=${days}`, 60000);
+}
+
+/**
+ * 获取策略列表
+ */
+async function apiGetStrategies() {
+    return apiFetch('/strategies');
+}
+
+/**
+ * 获取所有策略的信号强度摘要（看板用）
+ */
+async function apiGetStrategySignals() {
+    return apiFetch('/strategy/signals', 90000);
+}

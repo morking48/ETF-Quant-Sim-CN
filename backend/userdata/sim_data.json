@@ -1,6 +1,6 @@
 {
   "config": {
-    "initialCapital": 100000,
+    "initialCapital": 300000,
     "positionRatio": 0.3,
     "addRatio": 0.2,
     "maxSinglePct": 0.5,
@@ -8,25 +8,71 @@
     "stopLossPct": -0.05,
     "timeStopDays": 10,
     "signalSellPct": 0.4,
-    "tradeMode": "manual",
+    "tradeMode": "auto",
     "feeRate": 0.0003,
-    "strategy": "signal_band"
+    "strategy": "three_factor",
+    "gridRangeMode": "auto",
+    "gridLow": null,
+    "gridHigh": null,
+    "gridRangePct": 10,
+    "gridSpacingPct": 1.5,
+    "gridSpacingMode": "pct",
+    "basePositionPct": 50,
+    "reservePct": 10
   },
-  "trades": [],
+  "trades": [
+    {
+      "id": 1779169565005,
+      "date": "2026-05-19",
+      "code": "159919",
+      "name": "嘉实沪深300ETF",
+      "action": "BUY",
+      "price": 5.03,
+      "shares": 17800,
+      "amount": 89561,
+      "fee": 26.999999999999996,
+      "signal": "触发网格下线买入 @5.030"
+    }
+  ],
   "snapshots": [
     {
       "date": "init",
-      "cash": 100000,
+      "cash": 300000,
       "marketValue": 0,
-      "totalValue": 100000,
+      "totalValue": 300000,
       "dailyPnl": 0,
       "totalPnl": 0,
       "pnlPct": 0,
       "benchmarkPct": 0,
       "tradeCount": 0,
       "winCount": 0
+    },
+    {
+      "date": "2026-05-19",
+      "cash": 210439,
+      "marketValue": 89534,
+      "totalValue": 299973,
+      "dailyPnl": 0,
+      "totalPnl": -27,
+      "pnlPct": -0.01,
+      "benchmarkPct": 0,
+      "tradeCount": 1,
+      "winCount": 0
     }
   ],
-  "positions": [],
-  "savedAt": "2026-05-18T01:14:00.436Z"
+  "positions": [
+    {
+      "code": "159919",
+      "name": "嘉实沪深300ETF",
+      "shares": 17800,
+      "costPrice": 5.03,
+      "currentPrice": 5.03,
+      "marketValue": 89534,
+      "pnl": 0,
+      "pnlPct": 0,
+      "holdDays": 0,
+      "buyDate": "2026-05-19"
+    }
+  ],
+  "savedAt": "2026-05-19T05:46:13.039Z"
 }

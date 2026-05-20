@@ -1,89 +1,90 @@
 /**
  * 模拟交易引擎
- * 基于三因子信号进行纸上交易模拟
+ * 多策略独立存储 — 每策略独立 localStorage key
  */
 
 // ========== 默认配置 ==========
+// 通用默认配置，实际由各策略DEFAULT_CONFIG覆盖
 const DEFAULT_SIM_CONFIG = {
-    initialCapital: 100000,      // 初始资金 10万
-    positionRatio: 0.30,         // 首次建仓比例 30%
-    addRatio: 0.20,              // 加仓比例 20%
-    maxSinglePct: 0.50,          // 单只ETF上限 50%
-    maxTotalPct: 0.80,           // 总仓位上限 80%
-    stopLossPct: -0.05,          // 硬止损线 -5%
-    timeStopDays: 10,            // 时间止损天数
-    signalSellPct: 0.40,         // 信号卖出阈值(综合概率<40%)
-    tradeMode: 'manual',         // manual | semi | auto
-    feeRate: 0.00025,            // 手续费率 万2.5
-    strategy: 'signal_band',     // signal_band | ma_filter | position_rotate | grid_invest
+    initialCapital: 300000,
+    positionRatio: 0.30,
+    addRatio: 0.20,
+    maxSinglePct: 0.50,
+    maxTotalPct: 0.80,
+    stopLossPct: -0.05,
+    timeStopDays: 10,
+    signalSellPct: 0.40,
+    tradeMode: 'manual',
+    feeRate: 0.00025,
+    strategy: 'three_factor',
 };
 
-// ========== 存储Key ==========
-const STORAGE_KEYS = {
-    CONFIG: 'etf_sim_config',
-    TRADES: 'etf_sim_trades',
-    SNAPSHOTS: 'etf_sim_snapshots',
-    POSITIONS: 'etf_sim_positions',
-};
+// ========== 存储Key（按策略隔离） ==========
+function _simKey(base) {
+    const sid = (typeof activeStrategyId !== 'undefined') ? activeStrategyId : 'three_factor';
+    return 'etf_sim_' + base + '_' + sid;
+}
 
 // ========== 配置管理 ==========
 function getSimConfig() {
     try {
-        const raw = localStorage.getItem(STORAGE_KEYS.CONFIG);
-        if (raw) return { ...DEFAULT_SIM_CONFIG, ...JSON.parse(raw) };
-    } catch (e) { /* ignore */ }
-    return { ...DEFAULT_SIM_CONFIG };
+        const raw = localStorage.getItem(_simKey('config'));
+        const strategy = getActiveStrategy();
+        const merged = { ...DEFAULT_SIM_CONFIG, ...strategy.DEFAULT_CONFIG };
+        if (raw) return { ...merged, ...JSON.parse(raw) };
+        return { ...merged };
+    } catch (e) { return { ...DEFAULT_SIM_CONFIG }; }
 }
 
 function saveSimConfig(config) {
-    localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
+    localStorage.setItem(_simKey('config'), JSON.stringify(config));
 }
 
 function resetSimConfig() {
-    localStorage.removeItem(STORAGE_KEYS.CONFIG);
+    localStorage.removeItem(_simKey('config'));
 }
 
 // ========== 交易记录 ==========
 function getSimTrades() {
     try {
-        const raw = localStorage.getItem(STORAGE_KEYS.TRADES);
+        const raw = localStorage.getItem(_simKey('trades'));
         return raw ? JSON.parse(raw) : [];
     } catch (e) { return []; }
 }
 
 function saveSimTrades(trades) {
-    localStorage.setItem(STORAGE_KEYS.TRADES, JSON.stringify(trades));
+    localStorage.setItem(_simKey('trades'), JSON.stringify(trades));
 }
 
 // ========== 每日快照 ==========
 function getSimSnapshots() {
     try {
-        const raw = localStorage.getItem(STORAGE_KEYS.SNAPSHOTS);
+        const raw = localStorage.getItem(_simKey('snapshots'));
         return raw ? JSON.parse(raw) : [];
     } catch (e) { return []; }
 }
 
 function saveSimSnapshots(snapshots) {
-    localStorage.setItem(STORAGE_KEYS.SNAPSHOTS, JSON.stringify(snapshots));
+    localStorage.setItem(_simKey('snapshots'), JSON.stringify(snapshots));
 }
 
 // ========== 持仓管理 ==========
 function getSimPositions() {
     try {
-        const raw = localStorage.getItem(STORAGE_KEYS.POSITIONS);
+        const raw = localStorage.getItem(_simKey('positions'));
         return raw ? JSON.parse(raw) : [];
     } catch (e) { return []; }
 }
 
 function saveSimPositions(positions) {
-    localStorage.setItem(STORAGE_KEYS.POSITIONS, JSON.stringify(positions));
+    localStorage.setItem(_simKey('positions'), JSON.stringify(positions));
 }
 
 // ========== 重置模拟 ==========
 function resetSimulation() {
-    localStorage.removeItem(STORAGE_KEYS.TRADES);
-    localStorage.removeItem(STORAGE_KEYS.SNAPSHOTS);
-    localStorage.removeItem(STORAGE_KEYS.POSITIONS);
+    localStorage.removeItem(_simKey('trades'));
+    localStorage.removeItem(_simKey('snapshots'));
+    localStorage.removeItem(_simKey('positions'));
 }
 
 // ========== 核心引擎 ==========
@@ -178,40 +179,36 @@ function checkSellSignals(positions, analysisData) {
                 code: pos.code,
                 name: etfData.name,
                 action: 'SELL',
-                reason: `硬止损触发: 亏损${pos.pnlPct.toFixed(1)}%`,
-                priority: 1,
-                urgent: true,
+                reason: `硬止损: 持仓${etfData.name}(${pos.code}) 亏损${pos.pnlPct.toFixed(1)}% (成本¥${pos.costPrice.toFixed(3)}→现价¥${pos.currentPrice.toFixed(3)})`,
+                priority: 1, urgent: true,
             });
             continue;
         }
-        
+
         // ② 信号止损：综合概率 < 40%
         if (latest.cp < config.signalSellPct * 100) {
+            const vp = latest.vp != null ? latest.vp.toFixed(0) : '--';
+            const dp = latest.dp != null ? latest.dp.toFixed(0) : '--';
+            const sp = latest.sp != null ? latest.sp.toFixed(0) : '--';
             suggestions.push({
-                code: pos.code,
-                name: etfData.name,
-                action: 'SELL',
-                reason: `信号消退: 综合概率降至${latest.cp.toFixed(0)}%`,
-                priority: 2,
-                urgent: false,
+                code: pos.code, name: etfData.name, action: 'SELL',
+                reason: `信号消退: 持仓${etfData.name}(${pos.code}) cp=${latest.cp.toFixed(0)}% (量能P=${vp} 方向P=${dp} 份额P=${sp})`,
+                priority: 2, urgent: false,
             });
             continue;
         }
-        
+
         // ③ 时间止损：持有>10天且未盈利
         if (pos.holdDays >= config.timeStopDays && pos.pnl <= 0) {
             suggestions.push({
-                code: pos.code,
-                name: etfData.name,
-                action: 'SELL',
-                reason: `时间止损: 持有${pos.holdDays}天未盈利`,
-                priority: 3,
-                urgent: false,
+                code: pos.code, name: etfData.name, action: 'SELL',
+                reason: `时间止损: 持仓${etfData.name}(${pos.code}) 持有${pos.holdDays}天 现价¥${pos.currentPrice.toFixed(3)} 未盈利(盈亏¥${pos.pnl.toFixed(2)})`,
+                priority: 3, urgent: false,
             });
             continue;
         }
     }
-    
+
     return suggestions;
 }
 
@@ -241,6 +238,13 @@ function checkBuySignals(analysisData, cash, positions) {
     highSignals.sort((a, b) => b.latest.cp - a.latest.cp);
     midSignals.sort((a, b) => b.latest.cp - a.latest.cp);
     
+    const _fmtFactor = (l) => {
+        const vp = l.vp != null ? l.vp.toFixed(0) : '--';
+        const dp = l.dp != null ? l.dp.toFixed(0) : '--';
+        const sp = l.sp != null ? l.sp.toFixed(0) : '--';
+        return `cp=${l.cp.toFixed(0)}% (量能P=${vp} 方向P=${dp} 份额P=${sp})`;
+    };
+
     if (highSignals.length >= 3) {
         // 多ETF共振 → 买入信号最强的那只
         const best = highSignals[0];
@@ -249,7 +253,7 @@ function checkBuySignals(analysisData, cash, positions) {
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
-                reason: `多ETF共振: ${highSignals.length}只同时触发高确信`,
+                reason: `多ETF共振(${highSignals.length}只cp≥70): ${best.code} ${best.name} ${_fmtFactor(best.latest)}`,
                 priority: 1,
             });
         }
@@ -261,7 +265,7 @@ function checkBuySignals(analysisData, cash, positions) {
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
-                reason: `沪深300交叉验证: ${hs300High.length}/4只同步`,
+                reason: `HS300交叉验证(${hs300High.length}/4只): ${best.code} ${best.name} ${_fmtFactor(best.latest)}`,
                 priority: 2,
             });
         }
@@ -273,7 +277,7 @@ function checkBuySignals(analysisData, cash, positions) {
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
-                reason: `高确信信号: 综合概率${best.latest.cp.toFixed(0)}%`,
+                reason: `单只高确信: ${best.code} ${best.name} ${_fmtFactor(best.latest)}`,
                 priority: 3,
             });
         }
@@ -287,7 +291,7 @@ function checkBuySignals(analysisData, cash, positions) {
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
-                reason: `中等信号聚集: ${midSignals.length}只同时触发`,
+                reason: `中等信号聚集(${midSignals.length}只cp≥50): ${best.code} ${best.name} ${_fmtFactor(best.latest)}`,
                 priority: 4,
             });
         }
@@ -301,7 +305,7 @@ function checkBuySignals(analysisData, cash, positions) {
                 code: best.code,
                 name: best.name,
                 action: 'BUY',
-                reason: `中等信号: 综合概率${best.latest.cp.toFixed(0)}%，值得关注`,
+                reason: `中等信号: ${best.code} ${best.name} ${_fmtFactor(best.latest)}`,
                 priority: 5,
             });
         }
@@ -418,6 +422,82 @@ function executeTrade(suggestion, price, date) {
     saveSimPositions(positions);
     saveSimSnapshots(snapshots);
     
+    return { trades, positions, snapshots, cash, totalValue };
+}
+
+/**
+ * 部分卖出持仓（支持指定卖出份数，而非全部清仓）
+ */
+function executePartialSell(code, name, price, date, sellShares, reason) {
+    const config = getSimConfig();
+    const trades = getSimTrades();
+    const positions = getSimPositions();
+    const snapshots = getSimSnapshots();
+    const lastSnapshot = snapshots[snapshots.length - 1];
+    let cash = lastSnapshot ? lastSnapshot.cash : config.initialCapital;
+
+    const pos = positions.find(p => p.code === code);
+    if (!pos || pos.shares < sellShares) return null;
+
+    const income = sellShares * price;
+    const fee = Math.max(5, income * config.feeRate);
+    const actualIncome = income - fee;
+    // 按比例计算这部分持仓的盈亏
+    const costBasis = sellShares * pos.costPrice;
+    const pnl = actualIncome - costBasis;
+
+    cash += actualIncome;
+
+    // 记录交易
+    trades.push({
+        id: Date.now(),
+        date: date,
+        code: code,
+        name: name,
+        action: 'SELL',
+        price: price,
+        shares: sellShares,
+        amount: actualIncome,
+        fee: fee,
+        pnl: pnl,
+        signal: reason,
+        holdDays: pos.holdDays,
+    });
+
+    // 更新持仓：减去卖出份数
+    const remaining = pos.shares - sellShares;
+    if (remaining >= 100) {
+        pos.shares = remaining;
+        pos.marketValue = remaining * price;
+        pos.pnl = remaining * (price - pos.costPrice);
+    } else {
+        // 剩余不足1手，清仓
+        const idx = positions.indexOf(pos);
+        if (idx >= 0) positions.splice(idx, 1);
+    }
+
+    // 更新快照
+    const marketValue = positions.reduce((s, p) => s + (p.marketValue || 0), 0);
+    const totalValue = cash + marketValue;
+    const winRate = calcWinRate(trades);
+
+    snapshots.push({
+        date: date,
+        cash: Math.round(cash * 100) / 100,
+        marketValue: Math.round(marketValue * 100) / 100,
+        totalValue: Math.round(totalValue * 100) / 100,
+        dailyPnl: 0,
+        totalPnl: Math.round((totalValue - config.initialCapital) * 100) / 100,
+        pnlPct: calcTotalReturn(totalValue, config.initialCapital),
+        benchmarkPct: 0,
+        tradeCount: trades.length,
+        winCount: winRate.winCount,
+    });
+
+    saveSimTrades(trades);
+    saveSimPositions(positions);
+    saveSimSnapshots(snapshots);
+
     return { trades, positions, snapshots, cash, totalValue };
 }
 

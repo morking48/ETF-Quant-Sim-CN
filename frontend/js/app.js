@@ -8,10 +8,19 @@ let appData = null;
 let currentTab = 'dashboard';
 let isRefreshing = false;
 let lastRefreshMinute = -1;
+let _reportPanelBackup = null;
 
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('🛡️ ETF三因子监测系统启动...');
+    console.log('ETF 多策略量化系统 启动...');
+    
+    // 保存综合报告面板原始HTML（网格会覆盖）
+    const panel = document.getElementById('panel-report');
+    if (panel) _reportPanelBackup = panel.innerHTML;
+    
+    // 初始化策略选择器
+    initStrategySelector();
+    updateStrategyDescription();
     
     // 初始化Tab导航
     initTabNav();
@@ -157,21 +166,30 @@ async function doRefresh() {
         const etfList = await apiGetETFList();
         initDetailSelect(etfList);
         
-        // 2. 获取完整分析数据（份额缓存命中秒出，未命中~18s）
+        // 2. 按策略获取分析数据
         infoEl.textContent = '正在加载分析数据...';
-        const analysis = await apiGetAnalysis();
-        appData = analysis;
+        let analysis;
+        if (activeStrategyId === 'grid') {
+            analysis = await apiGetGridAnalysis(250);
+            appData = analysis;
+            // 网格策略专属渲染
+            renderGridDashboard(analysis);
+            renderGridReport(analysis);
+        } else {
+            analysis = await apiGetAnalysis();
+            appData = analysis;
+            // 三因子策略渲染
+            const histBtn = document.querySelector('[data-tab="history"]');
+            if (histBtn) histBtn.style.display = '';
+            // 恢复综合报告面板原始HTML（网格可能已覆盖）
+            const reportPanel = document.getElementById('panel-report');
+            if (reportPanel && _reportPanelBackup) reportPanel.innerHTML = _reportPanelBackup;
+            renderDashboard(analysis);
+            initHistory(analysis);
+            renderReport(analysis);
+        }
         
-        // 3. 渲染仪表盘
-        renderDashboard(analysis);
-        
-        // 4. 初始化历史视图
-        initHistory(analysis);
-        
-        // 5. 渲染综合报告
-        renderReport(analysis);
-        
-        // 6. 更新模拟盘
+        // 3. 更新模拟盘
         try {
             if (typeof updateSimulator === 'function') {
                 updateSimulator(analysis);
@@ -180,15 +198,19 @@ async function doRefresh() {
             console.warn('模拟盘更新跳过:', simErr.message);
         }
         
-        // 7. 数据健康检查
+        // 4. 数据健康检查
         validateDataFreshness(analysis);
-        
-        // 8. 更新刷新时间
+
+        // 5. 更新跨策略信号看板
+        await updateSignalDashboard();
+
+        // 6. 更新刷新时间
         const now = new Date();
-        infoEl.textContent = `分析日: ${analysis.target_date || '--'} | 刷新: ${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+        const tdate = analysis.target_date || analysis.etfs?.[0]?.recent_signal?.date || '--';
+        infoEl.textContent = `分析日: ${tdate} | 刷新: ${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
         updateHeaderTime(
             now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-            analysis.target_date || '--'
+            tdate
         );
         
         setStatusDot('ok');
@@ -210,6 +232,24 @@ async function doRefresh() {
 // ========== 数据可靠性校验 ==========
 function validateDataFreshness(analysis) {
     if (!analysis || !analysis.etfs) return;
+    
+    // 网格策略只检查数据新鲜度，不检查三因子特有字段
+    if (activeStrategyId === 'grid') {
+        const targetDate = analysis.target_date;
+        if (targetDate) {
+            const today = new Date();
+            const td = new Date(targetDate);
+            const daysDiff = Math.round((today - td) / 86400000);
+            if (daysDiff > 2) {
+                console.warn('🔍 数据健康检查: ⚠️ 数据滞后' + daysDiff + '天 (最新: ' + targetDate + ')');
+                setStatusDot('error');
+            } else {
+                console.log('✅ 数据健康检查通过 (网格策略)', { 目标日期: targetDate, ETF数量: analysis.etfs.filter(e => !e.error).length });
+                setStatusDot('ok');
+            }
+        }
+        return;
+    }
     
     const targetDate = analysis.target_date;
     const etfs = analysis.etfs;
@@ -281,5 +321,21 @@ function validateDataFreshness(analysis) {
         footer.textContent = `ETF国家队资金监测 · 三因子模型 · 腾讯财经API · v1.0 · ${statusIcon} 校验${
             issues.length > 0 ? ' (' + issues.length + '项问题)' : '通过'
         }`;
+    }
+}
+
+/**
+ * 异步更新跨策略信号看板（后台请求，不阻塞UI）
+ */
+async function updateSignalDashboard() {
+    try {
+        const data = await apiGetStrategySignals();
+        if (typeof renderSignalDashboard === 'function') {
+            renderSignalDashboard(data);
+        }
+    } catch (err) {
+        console.warn('信号看板更新跳过:', err.message);
+        const container = document.getElementById('signalDashboard');
+        if (container) container.style.display = 'none';
     }
 }

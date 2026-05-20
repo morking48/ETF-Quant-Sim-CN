@@ -15,6 +15,9 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+# 策略系统导入（自动发现 + 注册）
+import strategies
+
 # 将 etf-three-factor-v7/scripts 加入 sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TF_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'etf-three-factor-v7', 'scripts'))
@@ -450,6 +453,78 @@ def serve_app_static(filename):
     return _serve_file(PWA_DIR, filename)
 
 
+@app.route('/api/strategies', methods=['GET'])
+def list_strategies():
+    """返回所有已注册策略列表"""
+    from strategies import list_strategies as ls
+    return jsonify(ls())
+
+
+@app.route('/api/data/raw', methods=['GET'])
+def get_raw_data():
+    """返回策略无关的原始数据（K线 + 份额 + 指数）"""
+    codes = list(ETFS.keys())
+    day_param = request.args.get('days', 60, type=int)
+    kline_limit = max(60, min(day_param, 250))
+
+    idx_data = fetch_kline("sh000300", kline_limit)
+
+    first_kline = fetch_kline(codes[0], kline_limit)
+    target_date = first_kline[-1]["date"] if first_kline else datetime.now().strftime('%Y-%m-%d')
+
+    share_data = get_share_data_with_cache(codes, target_date)
+
+    etf_data = {}
+    for code in codes:
+        kline = fetch_kline(code, kline_limit)
+        info = ETFS[code]
+        etf_data[code] = {
+            "name": info["n"],
+            "index": info["idx"],
+            "kline": kline,
+            "shares": share_data.get(code, {}),
+        }
+
+    return jsonify({
+        "target_date": target_date,
+        "etfs": etf_data,
+        "index_kline": {
+            "code": "000300",
+            "name": "沪深300",
+            "kline": idx_data,
+        },
+    })
+
+
+@app.route('/api/strategy/<strategy_id>/backtest', methods=['POST'])
+def strategy_backtest(strategy_id):
+    """按策略ID执行回测"""
+    from strategies import get_strategy as gs
+    strategy = gs(strategy_id)
+    if not strategy:
+        return jsonify({"error": f"未知策略: {strategy_id}"}), 404
+
+    data = request.get_json(silent=True) or {}
+    config = {**strategy.DEFAULT_CONFIG, **data}
+
+    if strategy_id == "grid":
+        # 网格策略：用K线数据回测
+        code = data.get("code", "510300")
+        day_param = data.get("days", 250)
+        kline_limit = max(60, min(day_param, 250))
+        kline_data = fetch_kline(code, kline_limit)
+        if len(kline_data) < 60:
+            return jsonify({"error": f"K线数据不足({len(kline_data)}条，需≥60)"}), 500
+        result = strategy.run_backtest(kline_data=kline_data, config=config)
+        return jsonify(result)
+
+    elif strategy_id == "three_factor":
+        # 三因子：复用原有 backtest() 逻辑
+        return backtest()
+
+    return jsonify({"error": f"策略 {strategy_id} 的回测暂未实现"}), 501
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
@@ -661,7 +736,7 @@ def get_single_analysis(code):
         return jsonify({"error": f"数据不足({len(kline)}条)"}), 500
     
     target_date = kline[-1]["date"] if kline else datetime.now().strftime('%Y-%m-%d')
-    share_data = fetch_share_history([code], target_date, 5)
+    share_data = get_share_data_with_cache([code], target_date)
     
     hist, three_factor = analyze_single(code, kline, idx_data, 35, share_data)
     
@@ -681,29 +756,35 @@ def get_single_analysis(code):
 # ============================================================
 
 _SIMDATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'userdata')
-_SIMDATA_FILE = os.path.join(_SIMDATA_DIR, 'sim_data.json')
+
+def _sim_file(strategy='three_factor'):
+    return os.path.join(_SIMDATA_DIR, f'sim_data_{strategy}.json')
 
 
 @app.route('/api/sim/save', methods=['POST'])
 def sim_save():
-    """保存模拟盘数据到本地文件（供 git 同步）"""
+    """保存模拟盘数据到本地文件（按策略隔离，供 git 同步）"""
     try:
         data = request.get_json(silent=True) or {}
+        strategy = data.get('strategy', request.args.get('strategy', 'three_factor'))
+        filepath = _sim_file(strategy)
         os.makedirs(_SIMDATA_DIR, exist_ok=True)
-        with open(_SIMDATA_FILE, 'w', encoding='utf-8') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        return jsonify({"status": "ok", "message": f"已保存到 {_SIMDATA_FILE}"})
+        return jsonify({"status": "ok", "message": f"已保存到 {filepath}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/sim/load', methods=['GET'])
 def sim_load():
-    """从本地文件加载模拟盘数据"""
+    """从本地文件加载模拟盘数据（按策略隔离）"""
     try:
-        if not os.path.exists(_SIMDATA_FILE):
+        strategy = request.args.get('strategy', 'three_factor')
+        filepath = _sim_file(strategy)
+        if not os.path.exists(filepath):
             return jsonify({"data": None, "message": "暂无存档数据"})
-        with open(_SIMDATA_FILE, 'r', encoding='utf-8') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         return jsonify({"data": data, "message": "加载成功"})
     except Exception as e:
@@ -935,6 +1016,147 @@ def backtest():
     })
 
 
+# ============================================================
+# 策略专属分析端点（策略内部自实现）
+# ============================================================
+
+@app.route('/api/strategy/<strategy_id>/analyze', methods=['GET'])
+def strategy_analyze(strategy_id):
+    """按策略ID执行分析"""
+    strategy = strategies._registry.get(strategy_id)
+    if not strategy:
+        return jsonify({"error": f"未知策略: {strategy_id}"}), 404
+    if strategy_id == "grid":
+        # 网格策略分析 = 所有ETF的网格参数
+        days = request.args.get('days', 250, type=int)
+        results = []
+        for code, info in ETFS.items():
+            kline = fetch_kline(code, days)
+            if len(kline) >= 20:
+                cfg = strategy.DEFAULT_CONFIG.copy()
+                result = strategy.analyze_each(code, kline, cfg)
+                result["name"] = info["n"]
+                results.append(result)
+            else:
+                results.append({"code": code, "name": info["n"], "error": "数据不足"})
+        return jsonify({"strategy": strategy_id, "etfs": results})
+    return jsonify({"error": f"策略 {strategy_id} 暂不支持分析视图"}), 400
+
+
+# ========== 策略信号摘要看板 ==========
+@app.route('/api/strategy/signals', methods=['GET'])
+def get_strategy_signals():
+    """返回所有策略的信号强度摘要（直接复用已有函数计算）"""
+    from strategies.grid.config import DEFAULT_CONFIG as GRID_DEFAULT
+    from strategies.grid.analyze import analyze_grid
+
+    codes = list(ETFS.keys())
+    strategies_list = []
+
+    # 1. 三因子信号
+    try:
+        idx_data = fetch_kline("sh000300", 60)
+        first_kl = fetch_kline(codes[0], 60)
+        tgt = first_kl[-1]["date"] if first_kl else datetime.now().strftime('%Y-%m-%d')
+        share_data = get_share_data_with_cache(codes, tgt)
+
+        high_c, mid_c = 0, 0
+        hs300_codes = ["510300", "510310", "510330", "159919"]
+        hs300_high = 0
+        best_high = None
+
+        for code in codes:
+            kline = fetch_kline(code, 60)
+            if len(kline) < 22:
+                continue
+            hist, _ = analyze_single(code, kline, idx_data, 5, share_data)
+            if hist:
+                cp = hist[-1].get("cp", 0)
+                if cp >= 70:
+                    high_c += 1
+                    if code in hs300_codes:
+                        hs300_high += 1
+                    if best_high is None or cp > best_high[1]:
+                        best_high = (code, cp, ETFS[code]["n"])
+                elif cp >= 50:
+                    mid_c += 1
+
+        tf_total = len([c for c in codes if len(fetch_kline(c, 60)) >= 22])
+        tf_strength, tf_label = 0, '⚪无信号'
+        if high_c >= 3:
+            tf_strength, tf_label = 5, '🔥极强'
+        elif hs300_high >= 2:
+            tf_strength, tf_label = 4, '🟢强'
+        elif high_c >= 1:
+            tf_strength, tf_label = 3, '🟡中等'
+        elif mid_c >= 2:
+            tf_strength, tf_label = 2, '🟡偏弱'
+        elif mid_c >= 1:
+            tf_strength, tf_label = 1, '⚪弱'
+
+        suggestion = f"{best_high[0]} {best_high[2]} cp={best_high[1]:.0f}%" if best_high else None
+        strategies_list.append({
+            "id": "three_factor", "name": "三因子国家队资金流向",
+            "strength": tf_strength, "label": tf_label,
+            "summary": f'🔴高确信 {high_c} | 🟡中等 {mid_c} | ⚪低 {tf_total - high_c - mid_c}',
+            "suggestion": suggestion
+        })
+    except Exception as e:
+        strategies_list.append({"id": "three_factor", "name": "三因子", "strength": 0, "label": "❌异常", "summary": str(e)[:60], "suggestion": None})
+
+    # 2. 网格信号
+    try:
+        bottom_c, top_c, signal_today, mid_c = 0, 0, 0, 0
+        best_bottom = None
+        today_str = datetime.now().strftime('%Y-%m-%d')
+
+        for code in codes:
+            kline = fetch_kline(code, 250)
+            if len(kline) < 20:
+                continue
+            try:
+                result = analyze_grid(code, kline, GRID_DEFAULT)
+                pos = result.get('position_pct', 50)
+                if pos <= 20:
+                    bottom_c += 1
+                    if best_bottom is None or pos < best_bottom[1]:
+                        best_bottom = (code, pos, ETFS[code]["n"])
+                elif pos >= 80:
+                    top_c += 1
+                else:
+                    mid_c += 1
+                sig = result.get('recent_signal')
+                if sig and sig.get('date') == today_str:
+                    signal_today += 1
+            except:
+                continue
+
+        g_strength, g_label = 0, '⚪无信号'
+        if bottom_c > 0:
+            g_strength, g_label = 5, '🔥极强'
+        elif signal_today > 0:
+            g_strength, g_label = 4, '🟢强'
+        elif top_c > 0:
+            g_strength, g_label = 3, '🟡中等'
+        elif mid_c > 0:
+            g_strength, g_label = 2, '🟡偏弱'
+
+        suggestion_g = f"{best_bottom[0]} {best_bottom[2]} 位置{best_bottom[1]:.0f}%" if best_bottom else None
+        strategies_list.append({
+            "id": "grid", "name": "网格交易",
+            "strength": g_strength, "label": g_label,
+            "summary": f"📉底部 {bottom_c} | 📏中枢 {mid_c} | 📈顶部 {top_c}",
+            "suggestion": suggestion_g
+        })
+    except Exception as e:
+        strategies_list.append({"id": "grid", "name": "网格交易", "strength": 0, "label": "❌异常", "summary": str(e)[:60], "suggestion": None})
+
+    max_str = max(strategies_list, key=lambda x: x['strength'])
+    recommended = max_str['id'] if max_str['strength'] > 0 else None
+
+    return jsonify({"strategies": strategies_list, "recommended": recommended, "time": datetime.now().isoformat()})
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("ETF三因子 Web 后端服务")
@@ -946,4 +1168,4 @@ if __name__ == '__main__':
     print(f"单ETF:    http://localhost:5000/api/analysis/510300")
     print(f"K线数据:  http://localhost:5000/api/kline/510300")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

@@ -100,6 +100,7 @@ function renderGaugeChart(latest) {
 
     if (!doms.vp || !doms.dp || !doms.cp) return;
 
+    if (typeof echarts === 'undefined') return;
     if (!gaugeChartVp) {
         gaugeChartVp = echarts.init(doms.vp);
         gaugeChartDp = echarts.init(doms.dp);
@@ -179,6 +180,7 @@ function renderGaugeChart(latest) {
  * 渲染趋势折线图
  */
 function renderTrendChart(history) {
+    if (typeof echarts === 'undefined') return;
     const dom = document.getElementById('chartTrend');
     if (!dom) return;
     
