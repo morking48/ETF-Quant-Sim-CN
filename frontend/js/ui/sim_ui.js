@@ -579,7 +579,15 @@ function exportSimJSON() {
 
 function resetSimAndUI() {
     if (confirm('确定重置模拟盘吗？所有持仓和交易记录将被清空。')) {
-        resetSimulation(); initSimulator(); renderSimulator();
+        resetSimulation();
+        initSimulator();
+        window._lastSimSuggestions = null;
+        // 重置后重新生成建议（否则 renderSimSuggestions 会读到 null 显示为空）
+        if (typeof appData !== 'undefined' && appData && appData.etfs) {
+            updateSimulator(appData);  // 会调用 renderSimulator
+        } else {
+            renderSimulator();
+        }
     }
 }
 
@@ -1007,91 +1015,64 @@ function updateSimulator(analysisData) {
     renderSimulator();
 }
 
-// 网格策略交易建议生成
 function generateGridSuggestions(analysisData, positions) {
-    const suggestions = [];
-    const today = new Date().toISOString().slice(0, 10);
-    const config = getSimConfig();
-    const snapshots = getSimSnapshots();
-    const lastSnapshot = snapshots.length ? snapshots[snapshots.length - 1] : null;
-    let cashRemaining = lastSnapshot ? lastSnapshot.cash : config.initialCapital;
+    var suggestions = [];
+    var config = getSimConfig();
+    var snapshots = getSimSnapshots();
+    var lastSnapshot = snapshots.length ? snapshots[snapshots.length - 1] : null;
+    var cashRemaining = lastSnapshot ? lastSnapshot.cash : config.initialCapital;
+    var totalValue = cashRemaining + positions.reduce(function(s, p) { return s + (p.marketValue || 0); }, 0);
+    var budgetPerEtf = totalValue * (config.positionRatio || 0.3);  // 单只建仓预算
+    var maxPositions = 4;
 
-    for (const etf of analysisData.etfs) {
+    var etfs = analysisData.etfs || [];
+    for (var i = 0; i < etfs.length; i++) {
+        var etf = etfs[i];
         if (etf.error) continue;
 
-        const pos = etf.position_pct || 50;
-        const sig = etf.recent_signal;
-        const alreadyHeld = positions.find(p => p.code === etf.code);
+        var pos = etf.position_pct != null ? etf.position_pct : 50;
+        var alreadyHeld = positions.find(function(p) { return p.code === etf.code; });
 
-        const g = etf.grid || {};
-        const gridInfo = `区间${g.low?.toFixed(3)||'--'}~${g.high?.toFixed(3)||'--'} 第${etf.current_level}/${g.layers}层 间距${g.spacing?.toFixed(3)||'--'} 波动率${etf.annual_vol}%`;
-        const curPrice = etf.price ? `¥${etf.price.toFixed(3)}` : '--';
+        var g = etf.grid || {};
+        var gridInfo = '区间' + (g.low ? g.low.toFixed(3) : '--') + '~' + (g.high ? g.high.toFixed(3) : '--') +
+                       ' 第' + etf.current_level + '/' + g.layers + '层' +
+                       ' 间距' + (g.spacing ? g.spacing.toFixed(3) : '--') +
+                       ' 波' + etf.annual_vol + '%';
+        var curPrice = etf.price ? ('¥' + etf.price.toFixed(3)) : '--';
 
-        // 卖出信号：位置≥80% 且持有中
+        // 卖出：位置≥80% 且持有中 → 区间顶部清仓
         if (pos >= 80 && alreadyHeld) {
             suggestions.push({
                 code: etf.code, name: etf.name, action: 'SELL',
-                reason: `区间顶部(${pos}%)卖出 ${etf.name}(${etf.code}) ${curPrice} | ${gridInfo}`,
+                reason: '区间顶部(' + pos + '%)卖出 ' + etf.name + '(' + etf.code + ') ' + curPrice + ' | ' + gridInfo,
                 priority: 1, urgent: true,
             });
         }
-        // 买入信号：位置≤20% 且未持有 且有足够资金
-        else if (pos <= 20 && !alreadyHeld) {
-            const estPrice = etf.price || 0;
-            const minCost = estPrice > 0 ? estPrice * 100 + 5 : 0; // 至少1手+手续费
-            if (cashRemaining >= minCost) {
+        // 买入：位置≤20% 且未持有 且资金足够1手
+        else if (pos <= 20 && !alreadyHeld && suggestions.length < maxPositions) {
+            var estMinCost = etf.price ? etf.price * 100 + 5 : 1000;
+            if (cashRemaining >= estMinCost) {
                 suggestions.push({
                     code: etf.code, name: etf.name, action: 'BUY',
-                    reason: `区间底部(${pos}%)买入 ${etf.name}(${etf.code}) ${curPrice} 余额¥${formatNumber(cashRemaining,0)} | ${gridInfo}`,
+                    reason: '区间底部(' + pos + '%)买入 ' + etf.name + '(' + etf.code + ') ' + curPrice +
+                            ' | 余额¥' + formatNumber(cashRemaining, 0) + ' | ' + gridInfo,
                     priority: 1,
                 });
-                cashRemaining -= minCost; // 预留最小成本，避免推荐过多
+                cashRemaining -= budgetPerEtf;
             }
         }
-        // 最近信号买入且今天 且未持有 且有足够资金
-        else if (sig && sig.action === 'BUY' && sig.date === today && !alreadyHeld) {
-            const estPrice = sig.price || etf.price || 0;
-            const minCost = estPrice > 0 ? estPrice * 100 + 5 : 0;
-            if (cashRemaining >= minCost) {
-                suggestions.push({
-                    code: etf.code, name: etf.name, action: 'BUY',
-                    reason: `网格下线触发买入 ${etf.name}(${etf.code}) @${sig.price?.toFixed(3)||curPrice} 余额¥${formatNumber(cashRemaining,0)} | ${gridInfo}`,
-                    priority: 2,
-                });
-                cashRemaining -= minCost;
-            }
-        }
-        // 最近信号卖出且今天 且持有中
-        else if (sig && sig.action === 'SELL' && sig.date === today && alreadyHeld) {
-            suggestions.push({
-                code: etf.code, name: etf.name, action: 'SELL',
-                reason: `网格上线触发卖出 ${etf.name}(${etf.code}) @${sig.price?.toFixed(3)||curPrice} | ${gridInfo}`,
-                priority: 2, urgent: true,
-            });
-        }
-        // 偏离中枢建议
+        // 偏离中枢: pos≥70且持有→减仓, pos≤30且未持有→关注但不建议
         else if (pos >= 70 && alreadyHeld) {
             suggestions.push({
                 code: etf.code, name: etf.name, action: 'SELL',
-                reason: `偏离中枢(${pos}%)减仓 ${etf.name}(${etf.code}) ${curPrice} | ${gridInfo}`,
+                reason: '偏离中枢(' + pos + '%)减仓 ' + etf.name + '(' + etf.code + ') ' + curPrice + ' | ' + gridInfo,
                 priority: 3,
             });
         }
-        else if (pos <= 30 && !alreadyHeld) {
-            const estPrice = etf.price || 0;
-            const minCost = estPrice > 0 ? estPrice * 100 + 5 : 0;
-            if (cashRemaining >= minCost) {
-                suggestions.push({
-                    code: etf.code, name: etf.name, action: 'BUY',
-                    reason: `偏离中枢(${pos}%)关注 ${etf.name}(${etf.code}) ${curPrice} 余额¥${formatNumber(cashRemaining,0)} | ${gridInfo}`,
-                    priority: 3,
-                });
-                cashRemaining -= minCost;
-            }
-        }
+        // pos ≤ 30 且未持有：只在统计面板中显示"顶部/底部/中枢"计数，不生成买入建议
     }
 
-    suggestions.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    suggestions.sort(function(a, b) { return (a.priority || 99) - (b.priority || 99); });
     return suggestions;
 }
 
