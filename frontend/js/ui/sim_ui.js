@@ -762,6 +762,7 @@ async function execGridBacktest() {
         resultDiv.innerHTML = '<div style="background:var(--bg-secondary);border-radius:8px;padding:16px;">' +
             '<h4 style="margin-bottom:12px;color:var(--text-primary);">📈 网格回测结果</h4>' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">' +
+            '<div>📅 数据区间</div><div>' + (data.data_start_date || '') + ' ~ ' + (data.data_end_date || '') + '</div>' +
             '<div>💰 初始资金</div><div>¥' + formatNumber(data.initial_capital, 0) + '</div>' +
             '<div>📊 最终资产</div><div style="color:' + retColor + ';font-weight:700;">¥' + formatNumber(data.final_value, 2) + '</div>' +
             '<div>📈 总收益</div><div style="color:' + retColor + ';font-weight:700;">' + retSign + data.total_return + '%</div>' +

@@ -210,6 +210,8 @@ def run_grid_backtest(kline_data, config, code="510300"):
         sharpe = 0
 
     return {
+        "data_start_date": kline_data[0]["date"] if kline_data else "",
+        "data_end_date": kline_data[-1]["date"] if kline_data else "",
         "initial_capital": initial_capital,
         "final_value": round(final_value, 2),
         "total_return": total_return,
