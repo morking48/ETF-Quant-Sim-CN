@@ -1,0 +1,115 @@
+{
+  "config": {
+    "initialCapital": 300000,
+    "positionRatio": 0.3,
+    "addRatio": 0.2,
+    "maxSinglePct": 0.5,
+    "maxTotalPct": 0.8,
+    "stopLossPct": -0.05,
+    "timeStopDays": 10,
+    "signalSellPct": 0.4,
+    "tradeMode": "manual",
+    "feeRate": 0.0003,
+    "strategy": "three_factor",
+    "gridRangeMode": "auto",
+    "gridLow": null,
+    "gridHigh": null,
+    "gridRangePct": 10,
+    "gridSpacingPct": 1.5,
+    "gridSpacingMode": "pct",
+    "basePositionPct": 50,
+    "reservePct": 10
+  },
+  "trades": [
+    {
+      "id": 1779350325452,
+      "date": "2026-05-21",
+      "code": "510500",
+      "name": "华泰柏瑞中证500ETF",
+      "action": "BUY",
+      "price": 8.5,
+      "shares": 10500,
+      "amount": 89277,
+      "fee": 26.999999999999996,
+      "signal": "网格下线触发买入 华泰柏瑞中证500ETF(510500) @8.500 | 区间7.650~9.350 第3/6层 间距0.340 波动率26.1%"
+    },
+    {
+      "id": 1779350327179,
+      "date": "2026-05-21",
+      "code": "512100",
+      "name": "南方中证1000ETF",
+      "action": "BUY",
+      "price": 3.43,
+      "shares": 26200,
+      "amount": 89892.99757,
+      "fee": 26.997569999999996,
+      "signal": "网格下线触发买入 南方中证1000ETF(512100) @3.430 | 区间3.087~3.773 第3/6层 间距0.137 波动率26.2%"
+    }
+  ],
+  "snapshots": [
+    {
+      "date": "init",
+      "cash": 300000,
+      "marketValue": 0,
+      "totalValue": 300000,
+      "dailyPnl": 0,
+      "totalPnl": 0,
+      "pnlPct": 0,
+      "benchmarkPct": 0,
+      "tradeCount": 0,
+      "winCount": 0
+    },
+    {
+      "date": "2026-05-21",
+      "cash": 210723,
+      "marketValue": 89250,
+      "totalValue": 299973,
+      "dailyPnl": 0,
+      "totalPnl": -27,
+      "pnlPct": -0.01,
+      "benchmarkPct": 0,
+      "tradeCount": 1,
+      "winCount": 0
+    },
+    {
+      "date": "2026-05-21",
+      "cash": 120830,
+      "marketValue": 179116,
+      "totalValue": 299946,
+      "dailyPnl": 0,
+      "totalPnl": -54,
+      "pnlPct": -0.02,
+      "benchmarkPct": 0,
+      "tradeCount": 2,
+      "winCount": 0
+    }
+  ],
+  "positions": [
+    {
+      "code": "510500",
+      "name": "华泰柏瑞中证500ETF",
+      "shares": 10500,
+      "costPrice": 8.5,
+      "currentPrice": 8.5,
+      "marketValue": 89250,
+      "pnl": 0,
+      "pnlPct": 0,
+      "holdDays": 0,
+      "buyDate": "2026-05-21"
+    },
+    {
+      "code": "512100",
+      "name": "南方中证1000ETF",
+      "shares": 26200,
+      "costPrice": 3.43,
+      "currentPrice": 3.43,
+      "marketValue": 89866,
+      "pnl": 0,
+      "pnlPct": 0,
+      "holdDays": 0,
+      "buyDate": "2026-05-21"
+    }
+  ],
+  "savedAt": "2026-05-21T07:58:57.204Z",
+  "strategy": "grid"
+}

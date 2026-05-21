@@ -138,7 +138,7 @@ function renderGridReport(data) {
             <div class="report-summary">
                 <span>平均波动率: ${avgVol}%</span>
                 <span>震荡市占比: ${rangeCount}/${sorted.length}</span>
-                <span>网格间距: 1.5% (默认)</span>
+                <span>网格间距: 4.0% (默认)</span>
             </div>
             <h4>🏆 网格潜力排名</h4>
             <table class="report-table">

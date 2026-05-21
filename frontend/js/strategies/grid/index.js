@@ -22,7 +22,7 @@ class GridStrategy extends BaseStrategy {
         if (!positions || !positions.length) {
             suggestions.push({
                 code: '510300', name: '沪深300ETF', action: 'BUY',
-                reason: '网格策略: 建议启动网格交易（30万本金，区间±10%，间距1.5%）',
+                reason: '网格策略: 建议启动网格交易（30万本金，60日高低点区间，间距4.0%）',
                 priority: 1
             });
         }
@@ -30,23 +30,9 @@ class GridStrategy extends BaseStrategy {
     }
 
     getSellSignals(positions, signals, config) {
-        const suggestions = [];
-        for (const pos of positions) {
-            if (pos.pnlPct >= 3) {
-                suggestions.push({
-                    code: pos.code, name: pos.name, action: 'SELL',
-                    reason: `网格止盈: 盈利${pos.pnlPct.toFixed(1)}%`,
-                    priority: 1
-                });
-            } else if (pos.pnlPct <= -5) {
-                suggestions.push({
-                    code: pos.code, name: pos.name, action: 'SELL',
-                    reason: `网格止损: 亏损${pos.pnlPct.toFixed(1)}%`,
-                    priority: 1, urgent: true
-                });
-            }
-        }
-        return suggestions;
+        // 网格策略卖出信号由 sim_ui.js 的 generateGridSuggestions 统一处理
+        // 此处返回空，避免重复触发冲突逻辑
+        return [];
     }
 }
 

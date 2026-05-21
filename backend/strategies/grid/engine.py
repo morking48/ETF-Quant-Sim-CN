@@ -25,16 +25,26 @@ def calc_grid_params(kline_data, config):
         grid_low = config.get("grid_low") or current_price * 0.90
         grid_high = config.get("grid_high") or current_price * 1.10
     else:
+        # 自动模式：用前60天最高/最低价定区间，确保网格线固定、position_pct真实变化
+        prices_60 = [d["c"] for d in kline_data[-60:]] if len(kline_data) >= 60 else [d["c"] for d in kline_data]
+        grid_low = min(prices_60)
+        grid_high = max(prices_60)
+        # 如果区间过宽/过窄，用range_pct做约束
         range_pct = config.get("grid_range_pct", 10) / 100
-        grid_low = current_price * (1 - range_pct)
-        grid_high = current_price * (1 + range_pct)
+        center = (grid_low + grid_high) / 2
+        min_half = center * range_pct
+        actual_half = max(grid_high - center, center - grid_low)
+        if actual_half < min_half:
+            # 60日振幅太小，扩展到range_pct
+            grid_low = center * (1 - range_pct)
+            grid_high = center * (1 + range_pct)
 
     # 间距
     if config.get("grid_spacing_mode") == "fixed":
         spacing = config.get("grid_fixed_spacing", 0.05)
         layers = int((grid_high - grid_low) / spacing) + 1
     else:
-        spacing_pct = config.get("grid_spacing_pct", 1.5) / 100
+        spacing_pct = config.get("grid_spacing_pct", 4.0) / 100
         spacing = current_price * spacing_pct
         layers = int((grid_high - grid_low) / spacing) + 1
 
