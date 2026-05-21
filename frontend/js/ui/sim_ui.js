@@ -695,7 +695,7 @@ function showBacktest() {
             '<div class="config-section"><label>回测天数<select id="bt_days" style="width:100%;padding:8px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-default);border-radius:6px;">' +
             '<option value="60">近60天</option><option value="120">近120天</option><option value="250" selected>近250天(约1年)</option></select></label></div>' +
             '<div class="config-section"><label>网格区间(%) <input id="bt_gridRangePct" type="number" value="' + (config.gridRangePct || 10) + '" min="5" max="30" style="width:100%;"></label></div>' +
-            '<div class="config-section"><label>网格间距(%) <input id="bt_gridSpacingPct" type="number" value="' + (config.gridSpacingPct || 1.5) + '" min="0.5" max="10" step="0.1" style="width:100%;"></label></div>' +
+            '<div class="config-section"><label>网格间距(%) <input id="bt_gridSpacingPct" type="number" value="' + (config.gridSpacingPct || 4.0) + '" min="0.5" max="10" step="0.1" style="width:100%;"></label></div>' +
             '<div class="config-section"><label>底仓比例(%) <input id="bt_basePositionPct" type="number" value="' + (config.basePositionPct || 50) + '" min="10" max="80" style="width:100%;"></label></div>' +
             '<div class="config-section"><label>预留现金(%) <input id="bt_reservePct" type="number" value="' + (config.reservePct || 10) + '" min="0" max="30" style="width:100%;"></label></div>' +
             '<div class="config-section"><label>初始资金(万) <input id="bt_capital" type="number" value="' + (config.initialCapital / 10000) + '" min="1" max="100" step="0.5" style="width:100%;"></label></div>' +
