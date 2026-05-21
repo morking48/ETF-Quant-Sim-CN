@@ -858,10 +858,25 @@ def backtest():
     if not sorted_dates:
         return jsonify({"error": "指定区间内无数据"}), 400
 
+    # 风控参数
+    max_positions = 4          # 最大持仓数
+    max_single_pct = 0.50      # 单只ETF仓位上限
+
+    # 构建沪深300基准（用于权益曲线对比）
+    idx_price_map = {}
+    for row in idx_data:
+        idx_price_map[row["date"]] = row["c"]
+    idx_start_price = None
+    for d in sorted_dates:
+        if d in idx_price_map:
+            idx_start_price = idx_price_map[d]
+            break
+
     # 模拟交易
     cash = initial_capital
-    positions = {}  # {code: {shares, cost_price}}
+    positions = {}  # {code: {shares, cost_price, name}}
     trades = []
+    equity_curve = []  # [{date, total_value, benchmark_value, positions_detail}]
 
     for d in sorted_dates:
         day_data = date_map[d]
@@ -902,6 +917,7 @@ def backtest():
                 cash += actual_income
                 trades.append({
                     "date": d, "action": "SELL", "code": code,
+                    "name": pos.get("name", ETFS.get(code, {}).get("n", code)),
                     "price": round(pos["current_price"], 3), "shares": int(shares),
                     "amount": round(actual_income, 2), "fee": round(fee, 2),
                     "pnl": round(pnl, 2), "reason": sell_reason,
@@ -913,18 +929,22 @@ def backtest():
         total_value = cash + sum(p.get("market_value", 0) for p in positions.values())
         used_ratio = (total_value - cash) / total_value if total_value > 0 else 0
 
-        if used_ratio < 0.80:  # 总仓位 < 80%
+        if used_ratio < 0.80 and len(positions) < max_positions:
             eligible = []
             for code, h in day_data.items():
                 if code in positions:
                     continue
                 if h["cp"] >= buy_threshold:
-                    eligible.append((code, h))
+                    # 检查单只仓位上限
+                    single_buy_value = total_value * position_ratio
+                    if single_buy_value / total_value <= max_single_pct:
+                        eligible.append((code, h))
 
             if eligible:
                 # 买信号最强的1只
                 code, h = max(eligible, key=lambda x: x[1]["cp"])
-                max_buy = min(total_value * position_ratio, cash * 0.95)
+                max_buy = min(total_value * position_ratio, cash * 0.95,
+                             total_value * max_single_pct)
                 fee = max(5, max_buy * fee_rate)
                 shares = math.floor((max_buy - fee) / h["c"] / 100) * 100
                 if shares >= 100:
@@ -935,14 +955,41 @@ def backtest():
                         "cost_price": h["c"],
                         "current_price": h["c"],
                         "market_value": shares * h["c"],
-                        "hold_days": 0
+                        "hold_days": 0,
+                        "name": ETFS.get(code, {}).get("n", code)
                     }
                     trades.append({
                         "date": d, "action": "BUY", "code": code,
+                        "name": ETFS.get(code, {}).get("n", code),
                         "price": round(h["c"], 3), "shares": int(shares),
                         "amount": round(cost, 2), "fee": round(fee, 2),
                         "reason": f"三因子高确信: CP={h['cp']:.0f}%"
                     })
+
+        # 记录当日权益 + 基准 + 持仓明细
+        day_total = cash + sum(p.get("market_value", 0) for p in positions.values())
+        benchmark_val = initial_capital
+        if idx_start_price and d in idx_price_map:
+            benchmark_val = initial_capital * (idx_price_map[d] / idx_start_price)
+        pos_detail = []
+        for code, pos in positions.items():
+            pos_detail.append({
+                "code": code,
+                "name": pos.get("name", ""),
+                "shares": pos["shares"],
+                "price": round(pos.get("current_price", 0), 3),
+                "market_value": round(pos.get("market_value", 0), 2),
+                "weight_pct": round(pos.get("market_value", 0) / day_total * 100, 1) if day_total > 0 else 0,
+                "pnl_pct": round((pos.get("current_price", 0) - pos["cost_price"]) / pos["cost_price"] * 100, 1) if pos["cost_price"] > 0 else 0,
+                "hold_days": pos.get("hold_days", 0)
+            })
+        equity_curve.append({
+            "date": d,
+            "total_value": round(day_total, 2),
+            "benchmark_value": round(benchmark_val, 2),
+            "cash": round(cash, 2),
+            "positions": pos_detail
+        })
 
     # 最终结算
     final_mv = sum(p.get("market_value", 0) for p in positions.values())
@@ -955,28 +1002,13 @@ def backtest():
     win_trades = [t for t in sell_trades if t.get("pnl", 0) > 0]
     win_rate = round(len(win_trades) / len(sell_trades) * 100, 1) if sell_trades else 0
 
-    # 最大回撤
-    eq = [initial_capital]
-    cash_tmp = initial_capital
-    pos_tmp = {}
-    for d in sorted_dates:
-        day_data = date_map[d]
-        for code, pos in pos_tmp.items():
-            if code in day_data:
-                pos["mv"] = pos["shares"] * day_data[code]["c"]
-        # apply trades
-        for t in trades:
-            if t["date"] == d:
-                if t["action"] == "BUY":
-                    cash_tmp -= t["amount"]
-                    pos_tmp[t["code"]] = {"shares": t["shares"], "mv": t["shares"] * t["price"]}
-                elif t["action"] == "SELL" and t["code"] in pos_tmp:
-                    cash_tmp += t["amount"]
-                    del pos_tmp[t["code"]]
-        eq.append(cash_tmp + sum(p["mv"] for p in pos_tmp.values()))
-    peak = eq[0]
+    # 最大回撤（从equity_curve计算）
+    eq_vals = [e["total_value"] for e in equity_curve]
+    if not eq_vals:
+        eq_vals = [initial_capital]
+    peak = eq_vals[0]
     max_dd = 0
-    for v in eq:
+    for v in eq_vals:
         if v > peak:
             peak = v
         dd = (peak - v) / peak * 100 if peak > 0 else 0
@@ -986,15 +1018,21 @@ def backtest():
 
     # 夏普比
     daily_returns = []
-    for i in range(1, len(eq)):
-        if eq[i - 1] > 0:
-            daily_returns.append((eq[i] - eq[i - 1]) / eq[i - 1])
+    for i in range(1, len(eq_vals)):
+        if eq_vals[i - 1] > 0:
+            daily_returns.append((eq_vals[i] - eq_vals[i - 1]) / eq_vals[i - 1])
     if daily_returns:
         avg_ret = sum(daily_returns) / len(daily_returns)
         std_ret = (sum((r - avg_ret) ** 2 for r in daily_returns) / len(daily_returns)) ** 0.5
         sharpe = round(avg_ret / std_ret * (252 ** 0.5), 2) if std_ret > 0 else 0
     else:
         sharpe = 0
+
+    # 基准收益
+    benchmark_return = 0
+    if idx_start_price and equity_curve:
+        bench_final = equity_curve[-1]["benchmark_value"]
+        benchmark_return = round((bench_final - initial_capital) / initial_capital * 100, 2)
 
     return jsonify({
         "start_date": sorted_dates[0] if sorted_dates else "",
@@ -1005,6 +1043,7 @@ def backtest():
         "initial_capital": initial_capital,
         "final_value": round(final_value, 2),
         "total_return": total_return,
+        "benchmark_return": benchmark_return,
         "total_trades": len(trades),
         "buy_count": len(buy_trades),
         "sell_count": len(sell_trades),
@@ -1012,7 +1051,8 @@ def backtest():
         "win_rate": win_rate,
         "max_drawdown": str(max_dd),
         "sharpe": str(sharpe),
-        "trades": trades[:20]  # 最多返回20条
+        "equity_curve": equity_curve,
+        "trades": trades
     })
 
 
