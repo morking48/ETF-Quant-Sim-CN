@@ -1011,6 +1011,10 @@ function updateSimulator(analysisData) {
 function generateGridSuggestions(analysisData, positions) {
     const suggestions = [];
     const today = new Date().toISOString().slice(0, 10);
+    const config = getSimConfig();
+    const snapshots = getSimSnapshots();
+    const lastSnapshot = snapshots.length ? snapshots[snapshots.length - 1] : null;
+    let cashRemaining = lastSnapshot ? lastSnapshot.cash : config.initialCapital;
 
     for (const etf of analysisData.etfs) {
         if (etf.error) continue;
@@ -1031,21 +1035,31 @@ function generateGridSuggestions(analysisData, positions) {
                 priority: 1, urgent: true,
             });
         }
-        // 买入信号：位置≤20% 且未持有
+        // 买入信号：位置≤20% 且未持有 且有足够资金
         else if (pos <= 20 && !alreadyHeld) {
-            suggestions.push({
-                code: etf.code, name: etf.name, action: 'BUY',
-                reason: `区间底部(${pos}%)买入 ${etf.name}(${etf.code}) ${curPrice} | ${gridInfo}`,
-                priority: 1,
-            });
+            const estPrice = etf.price || 0;
+            const minCost = estPrice > 0 ? estPrice * 100 + 5 : 0; // 至少1手+手续费
+            if (cashRemaining >= minCost) {
+                suggestions.push({
+                    code: etf.code, name: etf.name, action: 'BUY',
+                    reason: `区间底部(${pos}%)买入 ${etf.name}(${etf.code}) ${curPrice} 余额¥${formatNumber(cashRemaining,0)} | ${gridInfo}`,
+                    priority: 1,
+                });
+                cashRemaining -= minCost; // 预留最小成本，避免推荐过多
+            }
         }
-        // 最近信号买入且今天 且未持有
+        // 最近信号买入且今天 且未持有 且有足够资金
         else if (sig && sig.action === 'BUY' && sig.date === today && !alreadyHeld) {
-            suggestions.push({
-                code: etf.code, name: etf.name, action: 'BUY',
-                reason: `网格下线触发买入 ${etf.name}(${etf.code}) @${sig.price?.toFixed(3)||curPrice} | ${gridInfo}`,
-                priority: 2,
-            });
+            const estPrice = sig.price || etf.price || 0;
+            const minCost = estPrice > 0 ? estPrice * 100 + 5 : 0;
+            if (cashRemaining >= minCost) {
+                suggestions.push({
+                    code: etf.code, name: etf.name, action: 'BUY',
+                    reason: `网格下线触发买入 ${etf.name}(${etf.code}) @${sig.price?.toFixed(3)||curPrice} 余额¥${formatNumber(cashRemaining,0)} | ${gridInfo}`,
+                    priority: 2,
+                });
+                cashRemaining -= minCost;
+            }
         }
         // 最近信号卖出且今天 且持有中
         else if (sig && sig.action === 'SELL' && sig.date === today && alreadyHeld) {
@@ -1064,11 +1078,16 @@ function generateGridSuggestions(analysisData, positions) {
             });
         }
         else if (pos <= 30 && !alreadyHeld) {
-            suggestions.push({
-                code: etf.code, name: etf.name, action: 'BUY',
-                reason: `偏离中枢(${pos}%)关注 ${etf.name}(${etf.code}) ${curPrice} | ${gridInfo}`,
-                priority: 3,
-            });
+            const estPrice = etf.price || 0;
+            const minCost = estPrice > 0 ? estPrice * 100 + 5 : 0;
+            if (cashRemaining >= minCost) {
+                suggestions.push({
+                    code: etf.code, name: etf.name, action: 'BUY',
+                    reason: `偏离中枢(${pos}%)关注 ${etf.name}(${etf.code}) ${curPrice} 余额¥${formatNumber(cashRemaining,0)} | ${gridInfo}`,
+                    priority: 3,
+                });
+                cashRemaining -= minCost;
+            }
         }
     }
 

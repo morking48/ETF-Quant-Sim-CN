@@ -85,6 +85,10 @@ function resetSimulation() {
     localStorage.removeItem(_simKey('trades'));
     localStorage.removeItem(_simKey('snapshots'));
     localStorage.removeItem(_simKey('positions'));
+    // 清除缓存建议，确保重新生成（否则reset后仍显示旧的已filter列表）
+    if (typeof window !== 'undefined') {
+        window._lastSimSuggestions = null;
+    }
 }
 
 // ========== 核心引擎 ==========
