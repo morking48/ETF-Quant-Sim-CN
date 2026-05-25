@@ -1173,13 +1173,14 @@ def get_strategy_signals():
 
         g_strength, g_label = 0, '⚪无信号'
         if bottom_c > 0:
+            # 有ETF处于底部区间 (≤20%) → 买入机会
             g_strength, g_label = 5, '🔥极强'
-        elif signal_today > 0:
-            g_strength, g_label = 4, '🟢强'
         elif top_c > 0:
+            # 有ETF处于顶部区间 (≥80%) → 卖出机会
             g_strength, g_label = 3, '🟡中等'
         elif mid_c > 0:
-            g_strength, g_label = 2, '🟡偏弱'
+            # 全部在中枢 → 无交易信号 (与模拟盘建议一致)
+            g_strength, g_label = 1, '⚪偏弱'
 
         suggestion_g = f"{best_bottom[0]} {best_bottom[2]} 位置{best_bottom[1]:.0f}%" if best_bottom else None
         strategies_list.append({

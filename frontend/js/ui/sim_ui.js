@@ -1002,10 +1002,9 @@ function updateSimulator(analysisData) {
     allSuggestions.sort((a, b) => (a.priority || 99) - (b.priority || 99));
     window._lastSimSuggestions = { suggestions: allSuggestions, stats: buildThreeFactorStats(analysisData, positions, cash) };
     if (config.tradeMode === 'auto' && allSuggestions.length > 0) {
-        for (const sug of allSuggestions) {
-            const etfData = analysisData.etfs.find(e => e.code === sug.code);
-            if (etfData && etfData.latest) executeTrade(sug, etfData.latest.c, date);
-        }
+        var autoSug = allSuggestions[0]; // 只执行最高优先级的一个建议
+        const etfData = analysisData.etfs.find(e => e.code === autoSug.code);
+        if (etfData && etfData.latest) executeTrade(autoSug, etfData.latest.c, date);
     } else if (config.tradeMode === 'semi') {
         for (const sug of sellSuggestions) {
             const etfData = analysisData.etfs.find(e => e.code === sug.code);
