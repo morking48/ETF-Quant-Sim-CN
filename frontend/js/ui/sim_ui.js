@@ -714,20 +714,13 @@ function showBacktest() {
     }
 
     // 三因子回测弹窗
-    let dateRange = '--';
-    if (appData && appData.etfs) {
-        const histories = appData.etfs.map(e => e.history).filter(h => h && h.length > 0);
-        if (histories.length > 0) {
-            const allDates = [...new Set(histories.flatMap(h => h.map(r => r.d)))].sort();
-            dateRange = allDates[0] + ' ~ ' + allDates[allDates.length - 1] + ' (' + allDates.length + '天可分析)';
-        }
-    }
+    const targetDate = appData ? (appData.target_date || '--') : '--';
     const today = new Date().toISOString().slice(0, 10);
     const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
     const minDate = '2024-09-11';
     const html = '<div class="config-overlay" id="backtestOverlay" onclick="if(event.target===this) hideBacktest()">' +
         '<div class="config-panel" style="width:560px;"><h3>📊 历史回测</h3>' +
-        '<div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">基于历史三因子信号模拟交易，评估策略效果<br>当前已分析：' + dateRange + '</div>' +
+        '<div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">基于历史三因子信号模拟交易，评估策略效果<br>分析日: ' + targetDate + ' | 回测将独立拉取完整历史K线（不受仪表盘35天窗口限制）</div>' +
         '<div class="config-section"><label>回测方式<select id="bt_mode" onchange="toggleBtMode()" style="width:100%;padding:8px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-default);border-radius:6px;">' +
         '<option value="days" selected>按天数</option><option value="custom">🔢 自定义日期区间</option></select></label></div>' +
         '<div id="bt_days_group" class="config-section"><label>回测天数<select id="bt_days" style="width:100%;padding:8px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-default);border-radius:6px;">' +
@@ -1108,8 +1101,10 @@ function updateSimulator(analysisData) {
 
     const settlement = settleHoldings(analysisData, date);
     const cash = settlement.cash || config.initialCapital;
+    // avg_cp 门禁：均值 < 50 时不生成买入建议（避免与综合报告"低确信"矛盾）
+    const avgCp = analysisData.report ? analysisData.report.avg_cp : null;
+    const buySuggestions = (avgCp != null && avgCp < 50) ? [] : checkBuySignals(analysisData, cash, positions);
     const sellSuggestions = checkSellSignals(positions, analysisData);
-    const buySuggestions = checkBuySignals(analysisData, cash, positions);
     const allSuggestions = [...sellSuggestions, ...buySuggestions];
     allSuggestions.sort((a, b) => (a.priority || 99) - (b.priority || 99));
     window._lastSimSuggestions = { suggestions: allSuggestions, stats: buildThreeFactorStats(analysisData, positions, cash) };

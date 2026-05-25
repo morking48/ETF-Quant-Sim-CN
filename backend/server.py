@@ -640,6 +640,27 @@ def get_etf_list():
     return jsonify([{"code": code, "name": info["n"], "index": info["idx"]} for code, info in ETFS.items()])
 
 
+@app.route('/api/analysis/<code>', methods=['GET'])
+def get_single_analysis(code):
+    """单只ETF详情分析"""
+    if code not in ETFS:
+        return jsonify({"error": f"未知ETF代码: {code}"}), 404
+    info = ETFS[code]
+    idx_data = fetch_kline("sh000300", 60)
+    kline = fetch_kline(code, 60)
+    if len(kline) < 22:
+        return jsonify({"code": code, "name": info["n"], "index": info["idx"], "error": f"数据不足({len(kline)}条)", "history": [], "latest": None})
+    first_kl = fetch_kline(list(ETFS.keys())[0], 60)
+    target_date = first_kl[-1]["date"] if first_kl else datetime.now().strftime('%Y-%m-%d')
+    share_data = get_share_data_with_cache([code], target_date)
+    hist, tf = analyze_single(code, kline, idx_data, 35, share_data)
+    latest = hist[-1] if hist else None
+    return jsonify({
+        "code": code, "name": info["n"], "index": info["idx"],
+        "history": hist, "latest": latest,
+        "mode": "three_factor" if tf else "two_factor",
+    })
+
 @app.route('/api/kline/<code>', methods=['GET'])
 def get_kline(code):
     limit = request.args.get('limit', 60, type=int)
@@ -1053,14 +1074,35 @@ def get_strategy_signals():
                     if best_high is None or cp > best_high[1]: best_high = (code, cp, ETFS[code]["n"])
                 elif cp >= 50: mid_c += 1
         tf_total = len([c for c in codes if len(fetch_kline(c, 60)) >= 22])
-        tf_strength, tf_label = 0, '⚪无信号'
-        if high_c >= 3: tf_strength, tf_label = 5, '🔥极强'
-        elif hs300_high >= 2: tf_strength, tf_label = 4, '🟢强'
-        elif high_c >= 1: tf_strength, tf_label = 3, '🟡中等'
-        elif mid_c >= 2: tf_strength, tf_label = 2, '🟡偏弱'
-        elif mid_c >= 1: tf_strength, tf_label = 1, '⚪弱'
+        # 计算所有ETF的平均CP，确保strength与综合报告一致
+        all_cps = []
+        for code in codes:
+            kline = fetch_kline(code, 60)
+            if len(kline) >= 22:
+                hist, _ = analyze_single(code, kline, idx_data, 5, share_data)
+                if hist: all_cps.append(hist[-1].get("cp", 0))
+        avg_cp = round(sum(all_cps) / len(all_cps), 1) if all_cps else 0
+        # 基于计数初步定级
+        raw_strength = 0
+        if high_c >= 3: raw_strength = 5
+        elif hs300_high >= 2: raw_strength = 4
+        elif high_c >= 1: raw_strength = 3
+        elif mid_c >= 2: raw_strength = 2
+        elif mid_c >= 1: raw_strength = 1
+        # avg_cp 修正（防止计数虚高但均值低可信度不足）
+        if avg_cp < 30: raw_strength = 0
+        elif avg_cp < 50: raw_strength = min(raw_strength, 1)
+        elif avg_cp < 70: raw_strength = min(raw_strength, 3)
+        # 标签
+        tf_strength = raw_strength
+        tf_label = {5: '🔥极强', 4: '🟢强', 3: '🟡中等', 2: '🟡偏弱', 1: '⚪弱'}.get(tf_strength, '⚪无信号')
         suggestion = f"{best_high[0]} {best_high[2]} cp={best_high[1]:.0f}%" if best_high else None
-        strategies_list.append({"id": "three_factor", "name": "三因子国家队资金流向", "strength": tf_strength, "label": tf_label, "summary": f'🔴高确信 {high_c} | 🟡中等 {mid_c} | ⚪低 {tf_total - high_c - mid_c}', "suggestion": suggestion})
+        strategies_list.append({
+            "id": "three_factor", "name": "三因子国家队资金流向",
+            "strength": tf_strength, "label": tf_label,
+            "summary": f'🔴高确信 {high_c} | 🟡中等 {mid_c} | ⚪低 {tf_total - high_c - mid_c} | 均CP {avg_cp}%',
+            "suggestion": suggestion
+        })
     except Exception as e:
         strategies_list.append({"id": "three_factor", "name": "三因子", "strength": 0, "label": "❌异常", "summary": str(e)[:60], "suggestion": None})
 
