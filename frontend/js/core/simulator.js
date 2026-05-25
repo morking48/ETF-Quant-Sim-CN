@@ -141,11 +141,14 @@ function settleHoldings(analysisData, date) {
     
     for (const pos of positions) {
         const etfData = analysisData.etfs.find(e => e.code === pos.code);
-        if (etfData && etfData.latest) {
-            pos.currentPrice = etfData.latest.c;
-            pos.marketValue = pos.shares * pos.currentPrice;
-            pos.pnl = (pos.currentPrice - pos.costPrice) * pos.shares;
-            pos.pnlPct = pos.costPrice > 0 ? ((pos.currentPrice - pos.costPrice) / pos.costPrice * 100) : 0;
+        if (!etfData) continue;
+        // 兼容网格策略(price)和三因子(latest.c)
+        const price = etfData.price || (etfData.latest ? etfData.latest.c : null);
+        if (price != null) {
+            pos.currentPrice = price;
+            pos.marketValue = pos.shares * price;
+            pos.pnl = (price - pos.costPrice) * pos.shares;
+            pos.pnlPct = pos.costPrice > 0 ? ((price - pos.costPrice) / pos.costPrice * 100) : 0;
             pos.holdDays = (date && pos.buyDate) ? daysBetween(pos.buyDate, date) : pos.holdDays || 0;
             totalMarketValue += pos.marketValue;
         }
@@ -189,7 +192,19 @@ function checkSellSignals(positions, analysisData) {
             continue;
         }
 
-        // ② 信号止损：综合概率 < 40%
+        // ② 止盈：盈利 ≥ 15%
+        if (pos.pnlPct >= 15) {
+            suggestions.push({
+                code: pos.code,
+                name: etfData.name,
+                action: 'SELL',
+                reason: `止盈: 持仓${etfData.name}(${pos.code}) 盈利${pos.pnlPct.toFixed(1)}% (成本¥${pos.costPrice.toFixed(3)}→现价¥${pos.currentPrice.toFixed(3)})`,
+                priority: 1, urgent: true,
+            });
+            continue;
+        }
+
+        // ③ 信号止损：综合概率 < 40%
         if (latest.cp < config.signalSellPct * 100) {
             const vp = latest.vp != null ? latest.vp.toFixed(0) : '--';
             const dp = latest.dp != null ? latest.dp.toFixed(0) : '--';
@@ -202,7 +217,7 @@ function checkSellSignals(positions, analysisData) {
             continue;
         }
 
-        // ③ 时间止损：持有>10天且未盈利
+        // ④ 时间止损：持有>10天且未盈利
         if (pos.holdDays >= config.timeStopDays && pos.pnl <= 0) {
             suggestions.push({
                 code: pos.code, name: etfData.name, action: 'SELL',
@@ -320,7 +335,10 @@ function executeTrade(suggestion, price, date) {
     if (suggestion.action === 'BUY') {
         // 计算买入股数
         const totalValue = cash + positions.reduce((s, p) => s + (p.marketValue || 0), 0);
-        const maxBuyAmount = totalValue * config.positionRatio;
+        // 已有持仓→加仓(addRatio)；无持仓→首次建仓(positionRatio)
+        const currentHolding = positions.find(p => p.code === suggestion.code);
+        const ratio = currentHolding ? (config.addRatio || config.positionRatio) : config.positionRatio;
+        const maxBuyAmount = totalValue * ratio;
         // 单只上限
         const maxSingleAmount = totalValue * config.maxSinglePct;
         const buyAmount = Math.min(maxBuyAmount, maxSingleAmount, cash);
@@ -396,13 +414,16 @@ function executeTrade(suggestion, price, date) {
     const marketValue = positions.reduce((s, p) => s + (p.marketValue || 0), 0);
     const totalValue = cash + marketValue;
     const winRate = calcWinRate(trades);
+    // 计算当日盈亏 = 当前总资产 - 上次快照总资产
+    const prevTotal = snapshots.length ? snapshots[snapshots.length - 1].totalValue : config.initialCapital;
+    const dailyPnl = Math.round((totalValue - prevTotal) * 100) / 100;
     
     snapshots.push({
         date: date,
         cash: Math.round(cash * 100) / 100,
         marketValue: Math.round(marketValue * 100) / 100,
         totalValue: Math.round(totalValue * 100) / 100,
-        dailyPnl: 0,
+        dailyPnl: dailyPnl,
         totalPnl: Math.round((totalValue - config.initialCapital) * 100) / 100,
         pnlPct: calcTotalReturn(totalValue, config.initialCapital),
         benchmarkPct: 0, // 由外部更新
@@ -472,13 +493,15 @@ function executePartialSell(code, name, price, date, sellShares, reason) {
     const marketValue = positions.reduce((s, p) => s + (p.marketValue || 0), 0);
     const totalValue = cash + marketValue;
     const winRate = calcWinRate(trades);
+    const prevTotal = snapshots.length ? snapshots[snapshots.length - 1].totalValue : config.initialCapital;
+    const dailyPnl = Math.round((totalValue - prevTotal) * 100) / 100;
 
     snapshots.push({
         date: date,
         cash: Math.round(cash * 100) / 100,
         marketValue: Math.round(marketValue * 100) / 100,
         totalValue: Math.round(totalValue * 100) / 100,
-        dailyPnl: 0,
+        dailyPnl: dailyPnl,
         totalPnl: Math.round((totalValue - config.initialCapital) * 100) / 100,
         pnlPct: calcTotalReturn(totalValue, config.initialCapital),
         benchmarkPct: 0,

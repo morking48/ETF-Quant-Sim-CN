@@ -177,12 +177,17 @@ def run_grid_backtest(kline_data, config, code="510300"):
 
     buy_trades = [t for t in trades if t["action"] == "BUY"]
     sell_trades = [t for t in trades if t["action"] == "SELL"]
-    win_trades = [
-        t for t in trades
-        if t["action"] == "SELL"
-        and t.get("price", 0) > 0
-    ]
-    win_rate = round(len(win_trades) / len(sell_trades) * 100, 1) if sell_trades else 0
+    # 按 level 匹配买卖对计算实际盈亏
+    buy_level_prices = {}
+    for t in trades:
+        if t["action"] == "BUY":
+            buy_level_prices[t["level"]] = t["price"]
+    win_count = 0
+    for t in sell_trades:
+        buy_p = buy_level_prices.get(t["level"])
+        if buy_p is not None and t["price"] > buy_p:
+            win_count += 1
+    win_rate = round(win_count / len(sell_trades) * 100, 1) if sell_trades else 0
 
     # 最大回撤
     peak = equity_curve[0]["total_value"]

@@ -300,7 +300,7 @@ function renderSimSuggestions() {
         const emptyMsg = stats && stats.type === 'three_factor'
             ? '📊 ' + (stats.high > 0 ? `${stats.high}只高确信(${Array.from({length:stats.high}, (_,i)=>'🔴').join('')}) 但均未触发买入条件` : `全部${stats.total}只ETF cp<70%，无高确信信号触发`) 
             : (stats && stats.type === 'grid'
-                ? '📏 全部' + stats.total + '只ETF处于区间中枢(20%~80%)，无极端位置触发'
+                ? '📏 全部' + stats.total + '只ETF处于区间中枢(20%~80%)，无极端位置触发<br>💡 提示：当前位置可考虑建立底仓(约' + Math.round(getSimConfig().basePositionPct || 50) + '%)，等待价格触及上下线后网格交易'
                 : '暂无交易建议（刷新数据后生成）');
         container.innerHTML = statsHtml + '<div class="sim-empty" style="color:var(--text-muted);font-size:13px;">' + emptyMsg + '</div>';
         return;
