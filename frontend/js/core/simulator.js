@@ -301,19 +301,7 @@ function checkBuySignals(analysisData, cash, positions) {
         }
     }
     
-    // 单只中等信号且未持仓也可提示（最宽松条件）
-    if (suggestions.length === 0 && midSignals.length >= 1) {
-        const best = midSignals[0];
-        if (!positions.find(p => p.code === best.code)) {
-            suggestions.push({
-                code: best.code,
-                name: best.name,
-                action: 'BUY',
-                reason: `中等信号: ${best.code} ${best.name} ${_fmtFactor(best.latest)}`,
-                priority: 5,
-            });
-        }
-    }
+    // 单只中等信号不主动建议（避免与仪表盘信号不符）
     
     return suggestions;
 }
