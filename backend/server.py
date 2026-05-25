@@ -10,6 +10,8 @@ import os
 import sys
 import time
 import threading
+import uuid
+import math
 from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request
@@ -43,6 +45,12 @@ ETFS = {
     "510500": {"n": "华泰柏瑞中证500ETF",  "idx": "中证500"},
     "512100": {"n": "南方中证1000ETF",    "idx": "中证1000"},
 }
+
+# ============================================================
+# 回测异步任务管理
+# ============================================================
+_BACKTEST_JOBS = {}
+_BACKTEST_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -161,7 +169,7 @@ def sprob(share_delta_pct):
 # 份额数据获取（akshare + JSON文件缓存）
 # ============================================================
 
-_SHARE_CACHE = {}      # {target_date: {code: {date: {shares_yi, delta_pct}}}}
+_SHARE_CACHE = {}
 _SHARE_LOCK = threading.Lock()
 _SHARE_JSON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_share_cache.json')
 
@@ -193,6 +201,10 @@ def _save_share_cache_to_disk():
 
 # 启动时加载缓存
 _load_share_cache_from_disk()
+
+# 内存缓存 (临时, 每次启动重建)
+_SSE_CACHE = {}
+_SZSE_CACHE = {}
 
 
 def _get_shares_sse(date_str):
@@ -235,10 +247,8 @@ def _get_shares_szse_range(start_date, end_date):
 
 
 def fetch_share_history(codes, target_date, lookback=5):
-    """
-    获取所有ETF的份额历史数据 (默认5天, ~18s)
-    返回: {code: {date: {shares_yi, delta_pct}}}
-    """
+    """获取所有ETF的份额历史数据 (默认5天, ~18s)
+    返回: {code: {date: {shares_yi, delta_pct}}}"""
     history = {}
     try:
         import akshare
@@ -253,7 +263,6 @@ def fetch_share_history(codes, target_date, lookback=5):
     sse_codes = [c for c in codes if c.startswith(('51', '56'))]
     szse_codes = [c for c in codes if c.startswith(('15', '16'))]
 
-    # 逐日查上交所 
     current = end_dt
     while current >= start_dt:
         ds = current.strftime('%Y%m%d')
@@ -272,7 +281,6 @@ def fetch_share_history(codes, target_date, lookback=5):
                     history[code][d] = {'shares_yi': round(shares, 2), 'date': d}
         current -= timedelta(days=1)
 
-    # 深交所批量查
     if szse_codes:
         szse_map = _get_shares_szse_range(start_str, end_str)
         for d_str, code_map in szse_map.items():
@@ -283,7 +291,6 @@ def fetch_share_history(codes, target_date, lookback=5):
                         history[code] = {}
                     history[code][d] = {'shares_yi': round(shares_yi, 2), 'date': d}
 
-    # 计算日份额变化百分比
     for code, dates in history.items():
         sorted_dates = sorted(dates.keys())
         for i, d in enumerate(sorted_dates):
@@ -299,19 +306,13 @@ def fetch_share_history(codes, target_date, lookback=5):
 
 
 def get_share_data_with_cache(codes, target_date):
-    """
-    获取份额数据（磁盘缓存 + 懒加载）:
-    1. 磁盘缓存命中 → 直接返回
-    2. 未命中 → 同步加载(5天 ~18s) + 写入磁盘
-    3. 加载失败 → 返回空{} (优雅降级二因子)
-    """
+    """获取份额数据（磁盘缓存 + 懒加载）"""
     global _SHARE_CACHE
     
     with _SHARE_LOCK:
         if target_date in _SHARE_CACHE:
             return _SHARE_CACHE[target_date]
     
-    # 同步加载
     try:
         print(f"[份额] 开始加载 {target_date} 的份额数据 (5天回溯)...")
         t0 = time.time()
@@ -321,16 +322,15 @@ def get_share_data_with_cache(codes, target_date):
         with _SHARE_LOCK:
             _SHARE_CACHE[target_date] = result
         
-        # 异步写磁盘
         t = threading.Thread(target=_save_share_cache_to_disk, daemon=True)
         t.start()
         
         share_count = len(result)
-        print(f"[份额] ✓ {target_date} 完成 ({elapsed:.1f}s), {share_count}只ETF")
+        print(f"[份额] 完成 {target_date} ({elapsed:.1f}s), {share_count}只ETF")
         return result
         
     except Exception as e:
-        print(f"[份额] ✗ {target_date} 失败: {type(e).__name__}: {e}")
+        print(f"[份额] 失败 {target_date}: {type(e).__name__}: {e}")
         return {}
 
 
@@ -382,7 +382,6 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
         vp = round(vprob(vr), 1)
         dp = dprob(chg, t5, t5i, vr, idchg)
         
-        # 份额因子 (可用时三因子，不可用时二因子回退)
         sp = None
         sd = None
         if share_data and code in share_data and d["date"] in share_data[code]:
@@ -397,20 +396,12 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
             cp = round(vp * 0.7 + dp * 0.3, 1)
         
         row = {
-            "d": d["date"],
-            "c": d["c"],
-            "chg": round(chg, 2),
-            "t5": round(t5, 2),
-            "t5i": t5i,
-            "idx_chg": idchg,
-            "v": round(v, 2),
-            "vma": round(ma, 2),
-            "vr": round(vr, 2),
-            "vp": vp,
-            "dp": dp,
+            "d": d["date"], "c": d["c"], "chg": round(chg, 2),
+            "t5": round(t5, 2), "t5i": t5i, "idx_chg": idchg,
+            "v": round(v, 2), "vma": round(ma, 2), "vr": round(vr, 2),
+            "vp": vp, "dp": dp,
             "sp": round(sp, 1) if sp is not None else None,
-            "sd": sd,
-            "cp": cp,
+            "sd": sd, "cp": cp,
             "signal": "HIGH" if cp >= 70 else ("MID" if cp >= 50 else "NORMAL"),
         }
         res.append(row)
@@ -419,424 +410,21 @@ def analyze_single(code, data, idx_d, days=35, share_data=None):
 
 
 # ============================================================
-# API 路由
+# 核心: 回测模拟引擎 (纯计算，不涉及后端)
 # ============================================================
+def _run_backtest_sim(all_hist, idx_data, sorted_dates, all_sorted_dates, initial_capital, position_ratio, buy_threshold, fee_rate):
+    """核心回测模拟逻辑，返回dict结果"""
+    max_positions = 4
+    max_single_pct = 0.50
 
-@app.route('/favicon.ico')
-def favicon():
-    return '', 204
-
-
-def _serve_file(directory, filename):
-    """通用文件服务"""
-    from flask import send_from_directory
-    return send_from_directory(directory, filename)
-
-
-@app.route('/')
-@app.route('/index.html')
-def serve_index():
-    """托管 Web 前端"""
-    return _serve_file(FRONTEND_DIR, 'index.html')
-
-
-@app.route('/app/')
-@app.route('/app/index.html')
-def serve_app_index():
-    """托管 PWA 移动端"""
-    return _serve_file(PWA_DIR, 'index.html')
-
-
-@app.route('/app/<path:filename>')
-def serve_app_static(filename):
-    """PWA 静态资源"""
-    return _serve_file(PWA_DIR, filename)
-
-
-@app.route('/api/strategies', methods=['GET'])
-def list_strategies():
-    """返回所有已注册策略列表"""
-    from strategies import list_strategies as ls
-    return jsonify(ls())
-
-
-@app.route('/api/data/raw', methods=['GET'])
-def get_raw_data():
-    """返回策略无关的原始数据（K线 + 份额 + 指数）"""
-    codes = list(ETFS.keys())
-    day_param = request.args.get('days', 60, type=int)
-    kline_limit = max(60, min(day_param, 250))
-
-    idx_data = fetch_kline("sh000300", kline_limit)
-
-    first_kline = fetch_kline(codes[0], kline_limit)
-    target_date = first_kline[-1]["date"] if first_kline else datetime.now().strftime('%Y-%m-%d')
-
-    share_data = get_share_data_with_cache(codes, target_date)
-
-    etf_data = {}
-    for code in codes:
-        kline = fetch_kline(code, kline_limit)
-        info = ETFS[code]
-        etf_data[code] = {
-            "name": info["n"],
-            "index": info["idx"],
-            "kline": kline,
-            "shares": share_data.get(code, {}),
-        }
-
-    return jsonify({
-        "target_date": target_date,
-        "etfs": etf_data,
-        "index_kline": {
-            "code": "000300",
-            "name": "沪深300",
-            "kline": idx_data,
-        },
-    })
-
-
-@app.route('/api/strategy/<strategy_id>/backtest', methods=['POST'])
-def strategy_backtest(strategy_id):
-    """按策略ID执行回测"""
-    from strategies import get_strategy as gs
-    strategy = gs(strategy_id)
-    if not strategy:
-        return jsonify({"error": f"未知策略: {strategy_id}"}), 404
-
-    data = request.get_json(silent=True) or {}
-    config = {**strategy.DEFAULT_CONFIG, **data}
-
-    if strategy_id == "grid":
-        # 网格策略：用K线数据回测
-        code = data.get("code", "510300")
-        day_param = data.get("days", 250)
-        kline_limit = max(60, min(day_param, 250))
-        kline_data = fetch_kline(code, kline_limit)
-        if len(kline_data) < 60:
-            return jsonify({"error": f"K线数据不足({len(kline_data)}条，需≥60)"}), 500
-        result = strategy.run_backtest(kline_data=kline_data, config=config)
-        return jsonify(result)
-
-    elif strategy_id == "three_factor":
-        # 三因子：复用原有 backtest() 逻辑
-        return backtest()
-
-    return jsonify({"error": f"策略 {strategy_id} 的回测暂未实现"}), 501
-
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
-
-
-@app.route('/api/etfs', methods=['GET'])
-def get_etf_list():
-    """获取监控ETF列表"""
-    return jsonify([{
-        "code": code,
-        "name": info["n"],
-        "index": info["idx"]
-    } for code, info in ETFS.items()])
-
-
-@app.route('/api/kline/<code>', methods=['GET'])
-def get_kline(code):
-    """获取单只ETF的K线数据"""
-    limit = request.args.get('limit', 60, type=int)
-    data = fetch_kline(code, limit)
-    return jsonify({
-        "code": code,
-        "count": len(data),
-        "data": data
-    })
-
-
-@app.route('/api/index_kline', methods=['GET'])
-def get_index_kline():
-    """获取沪深300指数的K线数据"""
-    limit = request.args.get('limit', 60, type=int)
-    data = fetch_kline("sh000300", limit)
-    return jsonify({
-        "code": "000300",
-        "name": "沪深300",
-        "count": len(data),
-        "data": data
-    })
-
-
-# 内存缓存 (临时, 每次启动重建)
-_SSE_CACHE = {}
-_SZSE_CACHE = {}
-
-
-@app.route('/api/analysis', methods=['GET'])
-def get_analysis():
-    """
-    三因子完整分析（含份额因子）
-    份额可用 → 三因子 (量能50% + 方向20% + 份额30%)
-    份额不可用 → 二因子优雅降级 (量能70% + 方向30%)
-    """
-    codes = list(ETFS.keys())
-    
-    # 1. 获取沪深300指数
-    idx_data = fetch_kline("sh000300", 60)
-    
-    # 2. 确定分析日期
-    first_kline = fetch_kline(codes[0], 60)
-    target_date = first_kline[-1]["date"] if first_kline else datetime.now().strftime('%Y-%m-%d')
-    
-    # 3. 获取份额数据 (缓存命中秒出; 未命中~18s加载5天)
-    share_data = get_share_data_with_cache(codes, target_date)
-    share_available = len(share_data) > 0
-    
-    # 4. 分析每只ETF (份额可用则三因子，否则二因子)
-    results = []
-    any_three_factor = False
-    for code, info in ETFS.items():
-        kline = fetch_kline(code, 60)
-        if len(kline) < 22:
-            results.append({
-                "code": code,
-                "name": info["n"],
-                "index": info["idx"],
-                "error": f"数据不足({len(kline)}条)",
-                "history": [],
-                "latest": None
-            })
-            continue
-        
-        hist, tf = analyze_single(code, kline, idx_data, 35, share_data)
-        if tf:
-            any_three_factor = True
-        latest = hist[-1] if hist else None
-        
-        results.append({
-            "code": code,
-            "name": info["n"],
-            "index": info["idx"],
-            "history": hist,
-            "latest": latest
-        })
-    
-    # 5. 计算汇总
-    high_count = sum(1 for r in results if r["latest"] and r["latest"]["cp"] >= 70)
-    mid_count = sum(1 for r in results if r["latest"] and 50 <= r["latest"]["cp"] < 70)
-    normal_count = sum(1 for r in results if r["latest"] and r["latest"]["cp"] < 50)
-    error_count = sum(1 for r in results if r["latest"] is None)
-    
-    hs300_codes = ["510300", "510310", "510330", "159919"]
-    hs300_high = sum(1 for r in results if r["code"] in hs300_codes and r["latest"] and r["latest"]["cp"] >= 50)
-    
-    # 6. 综合报告数据
-    # 6a. 成交量排名（按放量倍数降序）
-    volume_ranking = []
-    for r in results:
-        if r["latest"]:
-            vr = r["latest"]["vr"]
-            label = "极端放量" if vr >= 2.0 else ("显著放量" if vr >= 1.5 else ("温和放量" if vr >= 1.0 else "正常"))
-            volume_ranking.append({
-                "code": r["code"], "name": r["name"], "index": r["index"],
-                "vr": vr, "v": r["latest"]["v"], "vma": r["latest"]["vma"],
-                "chg": r["latest"]["chg"], "cp": r["latest"]["cp"],
-                "label": label
-            })
-    volume_ranking.sort(key=lambda x: x["vr"], reverse=True)
-    
-    # 6b. 方向一致性
-    up_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] > 0)
-    down_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] < 0)
-    flat_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] == 0)
-    if up_count >= len(results) * 0.75:
-        direction_consensus = "强一致看多"
-    elif down_count >= len(results) * 0.75:
-        direction_consensus = "强一致看空"
-    elif up_count > down_count:
-        direction_consensus = "偏多"
-    elif down_count > up_count:
-        direction_consensus = "偏空"
-    else:
-        direction_consensus = "分歧"
-    
-    # 6c. 综合评级
-    valid_cps = [r["latest"]["cp"] for r in results if r["latest"]]
-    avg_cp = round(sum(valid_cps) / len(valid_cps), 1) if valid_cps else 0
-    if avg_cp >= 70:
-        rating = "🔴 高确信 — 国家队大概率正在积极增持宽基ETF"
-    elif avg_cp >= 50:
-        rating = "🟡 中等确信 — 值得关注，等待更多确认信号"
-    elif avg_cp >= 30:
-        rating = "🟠 低确信 — 异常放量但无法归因于国家队"
-    else:
-        rating = "⚪ 无信号 — 正常交易，未检测到国家队操作痕迹"
-    
-    # 6d. 30日信号回溯（多ETF同步信号）
-    date_sig = {}
-    for r in results:
-        for h in r.get("history", []):
-            d = h["d"]
-            if d not in date_sig:
-                date_sig[d] = {"total": 0, "high": 0, "mid": 0, "codes": []}
-            date_sig[d]["total"] += 1
-            if h["cp"] >= 70:
-                date_sig[d]["high"] += 1
-                date_sig[d]["codes"].append(f"{r['code']}({h['cp']:.0f}%)")
-            elif h["cp"] >= 50:
-                date_sig[d]["mid"] += 1
-    signal_backtrack = []
-    for d, v in date_sig.items():
-        if v["high"] >= 2 or v["high"] + v["mid"] >= 4:
-            signal_backtrack.append({
-                "date": d,
-                "high": v["high"],
-                "mid": v["mid"],
-                "codes": v["codes"][:5]
-            })
-    signal_backtrack.sort(key=lambda x: x["date"], reverse=True)
-    
-    return jsonify({
-        "time": datetime.now().isoformat(),
-        "target_date": target_date,
-        "mode": "three_factor" if any_three_factor else "two_factor",
-        "share_available": share_available,
-        "share_status": "available" if share_available else "unavailable",
-        "summary": {
-            "high": high_count,
-            "mid": mid_count,
-            "normal": normal_count,
-            "error": error_count,
-            "hs300_alert": hs300_high
-        },
-        "report": {
-            "rating": rating,
-            "avg_cp": avg_cp,
-            "volume_ranking": volume_ranking,
-            "direction": {
-                "up": up_count,
-                "down": down_count,
-                "flat": flat_count,
-                "consensus": direction_consensus
-            },
-            "signal_backtrack": signal_backtrack[:10]
-        },
-        "etfs": results
-    })
-
-
-@app.route('/api/analysis/<code>', methods=['GET'])
-def get_single_analysis(code):
-    """获取单只ETF的三因子分析（含份额因子）"""
-    if code not in ETFS:
-        return jsonify({"error": f"未知ETF代码: {code}"}), 404
-    
-    idx_data = fetch_kline("sh000300", 60)
-    kline = fetch_kline(code, 60)
-    
-    if len(kline) < 22:
-        return jsonify({"error": f"数据不足({len(kline)}条)"}), 500
-    
-    target_date = kline[-1]["date"] if kline else datetime.now().strftime('%Y-%m-%d')
-    share_data = get_share_data_with_cache([code], target_date)
-    
-    hist, three_factor = analyze_single(code, kline, idx_data, 35, share_data)
-    
-    return jsonify({
-        "code": code,
-        "name": ETFS[code]["n"],
-        "index": ETFS[code]["idx"],
-        "mode": "three_factor" if three_factor else "two_factor",
-        "share_available": len(share_data) > 0,
-        "history": hist,
-        "latest": hist[-1] if hist else None
-    })
-
-
-# ============================================================
-# 模拟盘数据云端同步
-# ============================================================
-
-_SIMDATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'userdata')
-
-def _sim_file(strategy='three_factor'):
-    return os.path.join(_SIMDATA_DIR, f'sim_data_{strategy}.json')
-
-
-@app.route('/api/sim/save', methods=['POST'])
-def sim_save():
-    """保存模拟盘数据到本地文件（按策略隔离，供 git 同步）"""
-    try:
-        data = request.get_json(silent=True) or {}
-        strategy = data.get('strategy', request.args.get('strategy', 'three_factor'))
-        filepath = _sim_file(strategy)
-        os.makedirs(_SIMDATA_DIR, exist_ok=True)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return jsonify({"status": "ok", "message": f"已保存到 {filepath}"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/sim/load', methods=['GET'])
-def sim_load():
-    """从本地文件加载模拟盘数据（按策略隔离）"""
-    try:
-        strategy = request.args.get('strategy', 'three_factor')
-        filepath = _sim_file(strategy)
-        if not os.path.exists(filepath):
-            return jsonify({"data": None, "message": "暂无存档数据"})
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return jsonify({"data": data, "message": "加载成功"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/backtest', methods=['POST'])
-def backtest():
-    """历史回测：基于三因子信号模拟交易，支持自定义日期区间"""
-    import math
-    data = request.get_json(silent=True) or {}
-    days = data.get('days', 30)
-    start_date = data.get('start_date')
-    end_date = data.get('end_date')
-    position_ratio = data.get('position_ratio', 0.30)
-    buy_threshold = data.get('buy_threshold', 70)
-    fee_rate = data.get('fee_rate', 0.00025)
-    initial_capital = data.get('initial_capital', 100000)
-
-    codes = list(ETFS.keys())
-    max_kline_days = max(60, days + 30)
-    if start_date and end_date:
-        # 自定义区间：拉足够多的数据
-        max_kline_days = 250
-    idx_data = fetch_kline("sh000300", max_kline_days)
-
-    # 收集所有 ETF 的历史三因子数据
-    all_hist = {}
-    share_data = {}
-    first_kline = fetch_kline(codes[0], max(60, days + 30))
-    if not first_kline:
-        return jsonify({"error": "无法获取K线数据"}), 500
-    target_date = first_kline[-1]["date"]
-
-    # 尝试获取份额数据
-    try:
-        share_data = get_share_data_with_cache(codes, target_date)
-    except:
-        pass
-
-    for code in codes:
-        kline = fetch_kline(code, max_kline_days)
-        if len(kline) < 22:
-            continue
-        # 自定义区间用全量数据，否则只取 days+5
-        lookback = min(len(kline) - 5, max_kline_days - 5) if start_date else (days + 5)
-        hist, _ = analyze_single(code, kline, idx_data, lookback, share_data)
-        if hist:
-            all_hist[code] = hist
-
-    if len(all_hist) < 3:
-        return jsonify({"error": "可分析ETF不足3只"}), 500
+    idx_price_map = {}
+    for row in idx_data:
+        idx_price_map[row["date"]] = row["c"]
+    idx_start_price = None
+    for d in sorted_dates:
+        if d in idx_price_map:
+            idx_start_price = idx_price_map[d]
+            break
 
     # 按日期组织数据
     date_map = {}
@@ -847,41 +435,14 @@ def backtest():
                 date_map[d] = {}
             date_map[d][code] = h
 
-    all_sorted_dates = sorted(date_map.keys())
-    
-    if start_date and end_date:
-        # 自定义区间：过滤日期
-        sorted_dates = [d for d in all_sorted_dates if start_date <= d <= end_date]
-    else:
-        sorted_dates = all_sorted_dates[-days:]
-
-    if not sorted_dates:
-        return jsonify({"error": "指定区间内无数据"}), 400
-
-    # 风控参数
-    max_positions = 4          # 最大持仓数
-    max_single_pct = 0.50      # 单只ETF仓位上限
-
-    # 构建沪深300基准（用于权益曲线对比）
-    idx_price_map = {}
-    for row in idx_data:
-        idx_price_map[row["date"]] = row["c"]
-    idx_start_price = None
-    for d in sorted_dates:
-        if d in idx_price_map:
-            idx_start_price = idx_price_map[d]
-            break
-
-    # 模拟交易
     cash = initial_capital
-    positions = {}  # {code: {shares, cost_price, name}}
+    positions = {}
     trades = []
-    equity_curve = []  # [{date, total_value, benchmark_value, positions_detail}]
+    equity_curve = []
 
     for d in sorted_dates:
-        day_data = date_map[d]
+        day_data = date_map.get(d, {})
 
-        # 先结算持仓
         total_mv = 0
         for code, pos in list(positions.items()):
             if code in day_data:
@@ -890,7 +451,6 @@ def backtest():
                 total_mv += pos["market_value"]
                 pos["hold_days"] = pos.get("hold_days", 0) + 1
 
-        # 检查卖出信号
         for code, pos in list(positions.items()):
             if code not in day_data:
                 continue
@@ -898,13 +458,10 @@ def backtest():
             sell_reason = None
             pnl_pct = (pos["current_price"] - pos["cost_price"]) / pos["cost_price"] * 100 if pos["cost_price"] > 0 else 0
 
-            # 硬止损 -5%
             if pnl_pct <= -5:
                 sell_reason = f"硬止损: 亏损{pnl_pct:.1f}%"
-            # 信号消退 < 40%
             elif h["cp"] < 40:
                 sell_reason = f"信号消退: CP={h['cp']:.0f}%"
-            # 时间止损 > 10天未盈利
             elif pos.get("hold_days", 0) >= 10 and pnl_pct <= 0:
                 sell_reason = f"时间止损: 持有{pos['hold_days']}天未盈利"
 
@@ -925,7 +482,6 @@ def backtest():
                 })
                 del positions[code]
 
-        # 检查买入信号
         total_value = cash + sum(p.get("market_value", 0) for p in positions.values())
         used_ratio = (total_value - cash) / total_value if total_value > 0 else 0
 
@@ -935,28 +491,22 @@ def backtest():
                 if code in positions:
                     continue
                 if h["cp"] >= buy_threshold:
-                    # 检查单只仓位上限
                     single_buy_value = total_value * position_ratio
                     if single_buy_value / total_value <= max_single_pct:
                         eligible.append((code, h))
 
             if eligible:
-                # 买信号最强的1只
                 code, h = max(eligible, key=lambda x: x[1]["cp"])
-                max_buy = min(total_value * position_ratio, cash * 0.95,
-                             total_value * max_single_pct)
+                max_buy = min(total_value * position_ratio, cash * 0.95, total_value * max_single_pct)
                 fee = max(5, max_buy * fee_rate)
                 shares = math.floor((max_buy - fee) / h["c"] / 100) * 100
                 if shares >= 100:
                     cost = shares * h["c"] + fee
                     cash -= cost
                     positions[code] = {
-                        "shares": shares,
-                        "cost_price": h["c"],
-                        "current_price": h["c"],
-                        "market_value": shares * h["c"],
-                        "hold_days": 0,
-                        "name": ETFS.get(code, {}).get("n", code)
+                        "shares": shares, "cost_price": h["c"],
+                        "current_price": h["c"], "market_value": shares * h["c"],
+                        "hold_days": 0, "name": ETFS.get(code, {}).get("n", code)
                     }
                     trades.append({
                         "date": d, "action": "BUY", "code": code,
@@ -966,7 +516,6 @@ def backtest():
                         "reason": f"三因子高确信: CP={h['cp']:.0f}%"
                     })
 
-        # 记录当日权益 + 基准 + 持仓明细
         day_total = cash + sum(p.get("market_value", 0) for p in positions.values())
         benchmark_val = initial_capital
         if idx_start_price and d in idx_price_map:
@@ -974,49 +523,39 @@ def backtest():
         pos_detail = []
         for code, pos in positions.items():
             pos_detail.append({
-                "code": code,
-                "name": pos.get("name", ""),
-                "shares": pos["shares"],
-                "price": round(pos.get("current_price", 0), 3),
+                "code": code, "name": pos.get("name", ""),
+                "shares": pos["shares"], "price": round(pos.get("current_price", 0), 3),
                 "market_value": round(pos.get("market_value", 0), 2),
                 "weight_pct": round(pos.get("market_value", 0) / day_total * 100, 1) if day_total > 0 else 0,
                 "pnl_pct": round((pos.get("current_price", 0) - pos["cost_price"]) / pos["cost_price"] * 100, 1) if pos["cost_price"] > 0 else 0,
                 "hold_days": pos.get("hold_days", 0)
             })
         equity_curve.append({
-            "date": d,
-            "total_value": round(day_total, 2),
+            "date": d, "total_value": round(day_total, 2),
             "benchmark_value": round(benchmark_val, 2),
-            "cash": round(cash, 2),
-            "positions": pos_detail
+            "cash": round(cash, 2), "positions": pos_detail
         })
 
-    # 最终结算
     final_mv = sum(p.get("market_value", 0) for p in positions.values())
     final_value = cash + final_mv
     total_return = round((final_value - initial_capital) / initial_capital * 100, 2)
 
-    # 统计
     sell_trades = [t for t in trades if t["action"] == "SELL"]
     buy_trades = [t for t in trades if t["action"] == "BUY"]
     win_trades = [t for t in sell_trades if t.get("pnl", 0) > 0]
     win_rate = round(len(win_trades) / len(sell_trades) * 100, 1) if sell_trades else 0
 
-    # 最大回撤（从equity_curve计算）
     eq_vals = [e["total_value"] for e in equity_curve]
     if not eq_vals:
         eq_vals = [initial_capital]
     peak = eq_vals[0]
     max_dd = 0
     for v in eq_vals:
-        if v > peak:
-            peak = v
+        if v > peak: peak = v
         dd = (peak - v) / peak * 100 if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
+        if dd > max_dd: max_dd = dd
     max_dd = round(max_dd, 2)
 
-    # 夏普比
     daily_returns = []
     for i in range(1, len(eq_vals)):
         if eq_vals[i - 1] > 0:
@@ -1028,18 +567,16 @@ def backtest():
     else:
         sharpe = 0
 
-    # 基准收益
     benchmark_return = 0
     if idx_start_price and equity_curve:
         bench_final = equity_curve[-1]["benchmark_value"]
         benchmark_return = round((bench_final - initial_capital) / initial_capital * 100, 2)
 
-    return jsonify({
+    return {
         "start_date": sorted_dates[0] if sorted_dates else "",
         "end_date": sorted_dates[-1] if sorted_dates else "",
         "data_start_date": all_sorted_dates[0] if all_sorted_dates else "",
         "data_end_date": all_sorted_dates[-1] if all_sorted_dates else "",
-        "warning": ("请求区间超出数据范围，已自动截取" if (start_date and all_sorted_dates and start_date < all_sorted_dates[0]) else ""),
         "initial_capital": initial_capital,
         "final_value": round(final_value, 2),
         "total_return": total_return,
@@ -1052,29 +589,162 @@ def backtest():
         "max_drawdown": str(max_dd),
         "sharpe": str(sharpe),
         "equity_curve": equity_curve,
-        "trades": trades
+        "trades": trades,
+    }
+
+
+# ============================================================
+# API 路由
+# ============================================================
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
+
+
+def _serve_file(directory, filename):
+    from flask import send_from_directory
+    return send_from_directory(directory, filename)
+
+
+@app.route('/')
+@app.route('/index.html')
+def serve_index():
+    return _serve_file(FRONTEND_DIR, 'index.html')
+
+
+@app.route('/app/')
+@app.route('/app/index.html')
+def serve_app_index():
+    return _serve_file(PWA_DIR, 'index.html')
+
+
+@app.route('/app/<path:filename>')
+def serve_app_static(filename):
+    return _serve_file(PWA_DIR, filename)
+
+
+@app.route('/api/strategies', methods=['GET'])
+def list_strategies():
+    from strategies import list_strategies as ls
+    return jsonify(ls())
+
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+
+
+@app.route('/api/etfs', methods=['GET'])
+def get_etf_list():
+    return jsonify([{"code": code, "name": info["n"], "index": info["idx"]} for code, info in ETFS.items()])
+
+
+@app.route('/api/kline/<code>', methods=['GET'])
+def get_kline(code):
+    limit = request.args.get('limit', 60, type=int)
+    data = fetch_kline(code, limit)
+    return jsonify({"code": code, "count": len(data), "data": data})
+
+
+@app.route('/api/index_kline', methods=['GET'])
+def get_index_kline():
+    limit = request.args.get('limit', 60, type=int)
+    data = fetch_kline("sh000300", limit)
+    return jsonify({"code": "000300", "name": "沪深300", "count": len(data), "data": data})
+
+
+@app.route('/api/analysis', methods=['GET'])
+def get_analysis():
+    codes = list(ETFS.keys())
+    idx_data = fetch_kline("sh000300", 60)
+    first_kline = fetch_kline(codes[0], 60)
+    target_date = first_kline[-1]["date"] if first_kline else datetime.now().strftime('%Y-%m-%d')
+    share_data = get_share_data_with_cache(codes, target_date)
+    share_available = len(share_data) > 0
+
+    results = []
+    any_three_factor = False
+    for code, info in ETFS.items():
+        kline = fetch_kline(code, 60)
+        if len(kline) < 22:
+            results.append({"code": code, "name": info["n"], "index": info["idx"], "error": f"数据不足({len(kline)}条)", "history": [], "latest": None})
+            continue
+        hist, tf = analyze_single(code, kline, idx_data, 35, share_data)
+        if tf: any_three_factor = True
+        latest = hist[-1] if hist else None
+        results.append({"code": code, "name": info["n"], "index": info["idx"], "history": hist, "latest": latest})
+
+    high_count = sum(1 for r in results if r["latest"] and r["latest"]["cp"] >= 70)
+    mid_count = sum(1 for r in results if r["latest"] and 50 <= r["latest"]["cp"] < 70)
+    normal_count = sum(1 for r in results if r["latest"] and r["latest"]["cp"] < 50)
+    error_count = sum(1 for r in results if r["latest"] is None)
+    hs300_codes = ["510300", "510310", "510330", "159919"]
+    hs300_high = sum(1 for r in results if r["code"] in hs300_codes and r["latest"] and r["latest"]["cp"] >= 50)
+
+    volume_ranking = []
+    for r in results:
+        if r["latest"]:
+            vr = r["latest"]["vr"]
+            label = "极端放量" if vr >= 2.0 else ("显著放量" if vr >= 1.5 else ("温和放量" if vr >= 1.0 else "正常"))
+            volume_ranking.append({"code": r["code"], "name": r["name"], "index": r["index"], "vr": vr, "v": r["latest"]["v"], "vma": r["latest"]["vma"], "chg": r["latest"]["chg"], "cp": r["latest"]["cp"], "label": label})
+    volume_ranking.sort(key=lambda x: x["vr"], reverse=True)
+
+    up_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] > 0)
+    down_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] < 0)
+    flat_count = sum(1 for r in results if r["latest"] and r["latest"]["chg"] == 0)
+    if up_count >= len(results) * 0.75: direction_consensus = "强一致看多"
+    elif down_count >= len(results) * 0.75: direction_consensus = "强一致看空"
+    elif up_count > down_count: direction_consensus = "偏多"
+    elif down_count > up_count: direction_consensus = "偏空"
+    else: direction_consensus = "分歧"
+
+    valid_cps = [r["latest"]["cp"] for r in results if r["latest"]]
+    avg_cp = round(sum(valid_cps) / len(valid_cps), 1) if valid_cps else 0
+    if avg_cp >= 70: rating = "🔴 高确信 — 国家队大概率正在积极增持宽基ETF"
+    elif avg_cp >= 50: rating = "🟡 中等确信 — 值得关注，等待更多确认信号"
+    elif avg_cp >= 30: rating = "🟠 低确信 — 异常放量但无法归因于国家队"
+    else: rating = "⚪ 无信号 — 正常交易，未检测到国家队操作痕迹"
+
+    date_sig = {}
+    for r in results:
+        for h in r.get("history", []):
+            d = h["d"]
+            if d not in date_sig: date_sig[d] = {"total": 0, "high": 0, "mid": 0, "codes": []}
+            date_sig[d]["total"] += 1
+            if h["cp"] >= 70: date_sig[d]["high"] += 1; date_sig[d]["codes"].append(f"{r['code']}({h['cp']:.0f}%)")
+            elif h["cp"] >= 50: date_sig[d]["mid"] += 1
+    signal_backtrack = []
+    for d, v in date_sig.items():
+        if v["high"] >= 2 or v["high"] + v["mid"] >= 4:
+            signal_backtrack.append({"date": d, "high": v["high"], "mid": v["mid"], "codes": v["codes"][:5]})
+    signal_backtrack.sort(key=lambda x: x["date"], reverse=True)
+
+    return jsonify({
+        "time": datetime.now().isoformat(), "target_date": target_date,
+        "mode": "three_factor" if any_three_factor else "two_factor",
+        "share_available": share_available,
+        "share_status": "available" if share_available else "unavailable",
+        "summary": {"high": high_count, "mid": mid_count, "normal": normal_count, "error": error_count, "hs300_alert": hs300_high},
+        "report": {"rating": rating, "avg_cp": avg_cp, "volume_ranking": volume_ranking, "direction": {"up": up_count, "down": down_count, "flat": flat_count, "consensus": direction_consensus}, "signal_backtrack": signal_backtrack[:10]},
+        "etfs": results
     })
 
 
-# ============================================================
-# 策略专属分析端点（策略内部自实现）
-# ============================================================
-
 @app.route('/api/strategy/<strategy_id>/analyze', methods=['GET'])
 def strategy_analyze(strategy_id):
-    """按策略ID执行分析"""
     strategy = strategies._registry.get(strategy_id)
     if not strategy:
         return jsonify({"error": f"未知策略: {strategy_id}"}), 404
     if strategy_id == "grid":
-        # 网格策略分析 = 所有ETF的网格参数
+        from strategies.grid.analyze import analyze_grid
+        from strategies.grid.config import DEFAULT_CONFIG as GRID_DEFAULT
         days = request.args.get('days', 250, type=int)
         results = []
         for code, info in ETFS.items():
             kline = fetch_kline(code, days)
             if len(kline) >= 20:
-                cfg = strategy.DEFAULT_CONFIG.copy()
-                result = strategy.analyze_each(code, kline, cfg)
+                result = analyze_grid(code, kline, GRID_DEFAULT)
                 result["name"] = info["n"]
                 results.append(result)
             else:
@@ -1083,13 +753,277 @@ def strategy_analyze(strategy_id):
     return jsonify({"error": f"策略 {strategy_id} 暂不支持分析视图"}), 400
 
 
+@app.route('/api/strategy/<strategy_id>/backtest', methods=['POST'])
+def strategy_backtest(strategy_id):
+    from strategies import get_strategy as gs
+    strategy = gs(strategy_id)
+    if not strategy: return jsonify({"error": f"未知策略: {strategy_id}"}), 404
+    data = request.get_json(silent=True) or {}
+    config = {**strategy.DEFAULT_CONFIG, **data}
+    if strategy_id == "grid":
+        code = data.get("code", "510300")
+        day_param = data.get("days", 250)
+        kline_limit = max(60, min(day_param, 250))
+        kline_data = fetch_kline(code, kline_limit)
+        if len(kline_data) < 60: return jsonify({"error": f"K线数据不足({len(kline_data)}条，需≥60)"}), 500
+        result = strategy.run_backtest(kline_data=kline_data, config=config)
+        return jsonify(result)
+    elif strategy_id == "three_factor":
+        return backtest()
+    return jsonify({"error": f"策略 {strategy_id} 的回测暂未实现"}), 501
+
+
+# ============================================================
+# 模拟盘数据云端同步
+# ============================================================
+_SIMDATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'userdata')
+
+def _sim_file(strategy='three_factor'):
+    return os.path.join(_SIMDATA_DIR, f'sim_data_{strategy}.json')
+
+
+@app.route('/api/sim/save', methods=['POST'])
+def sim_save():
+    try:
+        data = request.get_json(silent=True) or {}
+        strategy = data.get('strategy', request.args.get('strategy', 'three_factor'))
+        filepath = _sim_file(strategy)
+        os.makedirs(_SIMDATA_DIR, exist_ok=True)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return jsonify({"status": "ok", "message": f"已保存到 {filepath}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/sim/load', methods=['GET'])
+def sim_load():
+    try:
+        strategy = request.args.get('strategy', 'three_factor')
+        filepath = _sim_file(strategy)
+        if not os.path.exists(filepath): return jsonify({"data": None, "message": "暂无存档数据"})
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify({"data": data, "message": "加载成功"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+# 回测端点 (支持三因子真份额数据后台加载)
+# ============================================================
+
+@app.route('/api/backtest', methods=['POST'])
+def backtest():
+    data = request.get_json(silent=True) or {}
+    days = data.get('days', 30)
+    start_date = data.get('start_date')
+    end_date = data.get('end_date')
+    position_ratio = data.get('position_ratio', 0.30)
+    buy_threshold = data.get('buy_threshold', 70)
+    fee_rate = data.get('fee_rate', 0.00025)
+    initial_capital = data.get('initial_capital', 100000)
+    use_shares = data.get('use_shares', False)
+
+    codes = list(ETFS.keys())
+    max_kline_days = max(60, days + 30)
+    if start_date and end_date:
+        max_kline_days = 250
+
+    # --- 三因子真份额数据模式 ---
+    if use_shares:
+        job_id = str(uuid.uuid4())
+        with _BACKTEST_LOCK:
+            _BACKTEST_JOBS[job_id] = {
+                'status': 'loading_shares', 'progress': 0, 'total': 0,
+                'message': '正在加载K线数据...', 'result': None, 'error': None,
+            }
+
+        def _run_bt(jid):
+            try:
+                job = _BACKTEST_JOBS.get(jid)
+                if not job: return
+
+                # Step 1: 拉K线确定日期范围
+                idx_data = fetch_kline("sh000300", max_kline_days)
+                all_hist_temp = {}
+                for code in codes:
+                    kline = fetch_kline(code, max_kline_days)
+                    if len(kline) < 22: continue
+                    lookback = min(len(kline) - 5, max_kline_days - 5)
+                    hist, _ = analyze_single(code, kline, idx_data, lookback, {})
+                    if hist: all_hist_temp[code] = hist
+
+                all_dates = set()
+                for hh in all_hist_temp.values():
+                    for h in hh: all_dates.add(h['d'])
+                sorted_all = sorted(all_dates)
+
+                if start_date and end_date:
+                    sorted_dates = [d for d in sorted_all if start_date <= d <= end_date]
+                else:
+                    sorted_dates = sorted_all[-days:]
+
+                if not sorted_dates:
+                    job['status'] = 'error'; job['error'] = '指定区间内无数据'; return
+
+                # Step 2: 拉份额数据
+                need_dates = set(sorted_dates)
+                first_idx = sorted_all.index(sorted_dates[0])
+                if first_idx > 0: need_dates.add(sorted_all[first_idx - 1])
+                missing = sorted([d for d in need_dates])
+                job['total'] = len(missing); job['progress'] = 0
+                job['message'] = f'正在拉取 {len(missing)} 天的历史份额数据...'
+
+                sse_codes = [c for c in codes if c.startswith(('51', '56'))]
+                szse_codes = [c for c in codes if c.startswith(('15', '16'))]
+                new_history = {}
+
+                for idx, d in enumerate(missing):
+                    job['progress'] = idx + 1
+                    job['message'] = f'上交所份额 {idx+1}/{len(missing)}: {d}'
+                    d8 = d.replace('-', '')
+                    df = _get_shares_sse(d8)
+                    if df is not None:
+                        for code in sse_codes:
+                            try:
+                                import pandas as pd
+                                row = df[df['基金代码'] == code]
+                                if len(row) > 0:
+                                    sy = round(float(row['基金份额'].values[0]) / 1e8, 2)
+                                    if d not in new_history: new_history[d] = {}
+                                    new_history[d][code] = {'shares_yi': sy, 'date': d}
+                            except: pass
+
+                if szse_codes and missing:
+                    job['message'] = f'深交所份额 {missing[0]}~{missing[-1]}...'
+                    min_d8 = missing[0].replace('-', '')
+                    max_d8 = missing[-1].replace('-', '')
+                    data_map = _get_shares_szse_range(min_d8, max_d8)
+                    for d_str, cm in data_map.items():
+                        d = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:8]}"
+                        for code, sy in cm.items():
+                            if code in szse_codes:
+                                if d not in new_history: new_history[d] = {}
+                                new_history[d][code] = {'shares_yi': round(sy, 2), 'date': d}
+
+                # 计算delta
+                job['message'] = '计算份额变化率...'
+                for code in codes:
+                    dates_with = sorted([dd for dd in new_history if code in new_history[dd]])
+                    for i, dd in enumerate(dates_with):
+                        if i > 0:
+                            prev = new_history[dates_with[i - 1]][code]['shares_yi']
+                            curr = new_history[dd][code]['shares_yi']
+                            if prev > 0:
+                                new_history[dd][code]['delta_yi'] = round(curr - prev, 2)
+                                new_history[dd][code]['delta_pct'] = round((curr - prev) / prev * 100, 2)
+
+                # 构建share_data_lookup: {code: {date: {delta_pct}}}
+                share_lookup = {}
+                for dd, cd in new_history.items():
+                    for c in codes:
+                        if c in cd:
+                            if c not in share_lookup: share_lookup[c] = {}
+                            share_lookup[c][dd] = cd[c]
+
+                # 写入磁盘缓存
+                with _SHARE_LOCK:
+                    for dd, cd in new_history.items():
+                        if dd not in _SHARE_CACHE: _SHARE_CACHE[dd] = {}
+                        for c in codes:
+                            if c in cd:
+                                if c not in _SHARE_CACHE[dd]: _SHARE_CACHE[dd][c] = {}
+                                _SHARE_CACHE[dd][c][dd] = cd[c]
+                try: _save_share_cache_to_disk()
+                except: pass
+
+                # Step 3: 用真实份额重新分析
+                job['status'] = 'computing'
+                job['progress'] = 0; job['total'] = len(codes)
+                job['message'] = '正在用三因子模型计算...'
+                all_hist = {}
+                for idx, code in enumerate(codes):
+                    job['progress'] = idx + 1
+                    job['message'] = f'三因子计算 {idx+1}/{len(codes)}: {code} {ETFS[code]["n"]}'
+                    kline = fetch_kline(code, max_kline_days)
+                    if len(kline) < 22: continue
+                    lookback = min(len(kline) - 5, max_kline_days - 5)
+                    hist, tf = analyze_single(code, kline, idx_data, lookback, share_lookup)
+                    if hist: all_hist[code] = hist
+
+                # Step 4: 回测模拟
+                job['message'] = '执行回测模拟...'
+                result = _run_backtest_sim(all_hist, idx_data, sorted_dates, sorted_all, initial_capital, position_ratio, buy_threshold, fee_rate)
+                job['status'] = 'done'; job['result'] = result; job['message'] = '回测完成'
+
+            except Exception as e:
+                job = _BACKTEST_JOBS.get(jid)
+                if job: job['status'] = 'error'; job['error'] = str(e)
+                import traceback; traceback.print_exc()
+
+        t = threading.Thread(target=_run_bt, args=(job_id,), daemon=True)
+        t.start()
+        return jsonify({"job_id": job_id, "status": "loading_shares", "message": "后台加载中..."})
+
+    # --- 二因子模式（同步，快速）---
+    idx_data = fetch_kline("sh000300", max_kline_days)
+    all_hist = {}
+    share_data = {}
+    first_kline = fetch_kline(codes[0], max(60, days + 30))
+    if not first_kline: return jsonify({"error": "无法获取K线数据"}), 500
+    target_date = first_kline[-1]["date"]
+    try: share_data = get_share_data_with_cache(codes, target_date)
+    except: pass
+
+    for code in codes:
+        kline = fetch_kline(code, max_kline_days)
+        if len(kline) < 22: continue
+        lookback = min(len(kline) - 5, max_kline_days - 5) if start_date else (days + 5)
+        hist, _ = analyze_single(code, kline, idx_data, lookback, share_data)
+        if hist: all_hist[code] = hist
+
+    if len(all_hist) < 3: return jsonify({"error": "可分析ETF不足3只"}), 500
+
+    # 按日期组织 + 运行时筛选
+    date_map_temp = {}
+    for code, hist in all_hist.items():
+        for h in hist:
+            d = h["d"]
+            if d not in date_map_temp: date_map_temp[d] = {}
+            date_map_temp[d][code] = h
+    all_sorted_dates = sorted(date_map_temp.keys())
+    if start_date and end_date:
+        sorted_dates = [d for d in all_sorted_dates if start_date <= d <= end_date]
+    else:
+        sorted_dates = all_sorted_dates[-days:]
+    if not sorted_dates: return jsonify({"error": "指定区间内无数据"}), 400
+
+    result = _run_backtest_sim(all_hist, idx_data, sorted_dates, all_sorted_dates, initial_capital, position_ratio, buy_threshold, fee_rate)
+    return jsonify(result)
+
+
+@app.route('/api/backtest/status/<job_id>', methods=['GET'])
+def backtest_status(job_id):
+    with _BACKTEST_LOCK:
+        job = _BACKTEST_JOBS.get(job_id)
+    if not job:
+        return jsonify({"status": "not_found", "error": "任务不存在"}), 404
+    resp = {"status": job["status"], "progress": job.get("progress", 0), "total": job.get("total", 0), "message": job.get("message", "")}
+    if job["status"] == "done":
+        resp["result"] = job["result"]
+        # 清理旧任务(保留5分钟)
+        job['_cleanup_at'] = time.time() + 300
+    elif job["status"] == "error":
+        resp["error"] = job.get("error", "未知错误")
+    return jsonify(resp)
+
+
 # ========== 策略信号摘要看板 ==========
 @app.route('/api/strategy/signals', methods=['GET'])
 def get_strategy_signals():
-    """返回所有策略的信号强度摘要（直接复用已有函数计算）"""
     from strategies.grid.config import DEFAULT_CONFIG as GRID_DEFAULT
     from strategies.grid.analyze import analyze_grid
-
     codes = list(ETFS.keys())
     strategies_list = []
 
@@ -1099,102 +1033,59 @@ def get_strategy_signals():
         first_kl = fetch_kline(codes[0], 60)
         tgt = first_kl[-1]["date"] if first_kl else datetime.now().strftime('%Y-%m-%d')
         share_data = get_share_data_with_cache(codes, tgt)
-
         high_c, mid_c = 0, 0
         hs300_codes = ["510300", "510310", "510330", "159919"]
-        hs300_high = 0
-        best_high = None
-
+        hs300_high = 0; best_high = None
         for code in codes:
             kline = fetch_kline(code, 60)
-            if len(kline) < 22:
-                continue
+            if len(kline) < 22: continue
             hist, _ = analyze_single(code, kline, idx_data, 5, share_data)
             if hist:
                 cp = hist[-1].get("cp", 0)
                 if cp >= 70:
                     high_c += 1
-                    if code in hs300_codes:
-                        hs300_high += 1
-                    if best_high is None or cp > best_high[1]:
-                        best_high = (code, cp, ETFS[code]["n"])
-                elif cp >= 50:
-                    mid_c += 1
-
+                    if code in hs300_codes: hs300_high += 1
+                    if best_high is None or cp > best_high[1]: best_high = (code, cp, ETFS[code]["n"])
+                elif cp >= 50: mid_c += 1
         tf_total = len([c for c in codes if len(fetch_kline(c, 60)) >= 22])
         tf_strength, tf_label = 0, '⚪无信号'
-        if high_c >= 3:
-            tf_strength, tf_label = 5, '🔥极强'
-        elif hs300_high >= 2:
-            tf_strength, tf_label = 4, '🟢强'
-        elif high_c >= 1:
-            tf_strength, tf_label = 3, '🟡中等'
-        elif mid_c >= 2:
-            tf_strength, tf_label = 2, '🟡偏弱'
-        elif mid_c >= 1:
-            tf_strength, tf_label = 1, '⚪弱'
-
+        if high_c >= 3: tf_strength, tf_label = 5, '🔥极强'
+        elif hs300_high >= 2: tf_strength, tf_label = 4, '🟢强'
+        elif high_c >= 1: tf_strength, tf_label = 3, '🟡中等'
+        elif mid_c >= 2: tf_strength, tf_label = 2, '🟡偏弱'
+        elif mid_c >= 1: tf_strength, tf_label = 1, '⚪弱'
         suggestion = f"{best_high[0]} {best_high[2]} cp={best_high[1]:.0f}%" if best_high else None
-        strategies_list.append({
-            "id": "three_factor", "name": "三因子国家队资金流向",
-            "strength": tf_strength, "label": tf_label,
-            "summary": f'🔴高确信 {high_c} | 🟡中等 {mid_c} | ⚪低 {tf_total - high_c - mid_c}',
-            "suggestion": suggestion
-        })
+        strategies_list.append({"id": "three_factor", "name": "三因子国家队资金流向", "strength": tf_strength, "label": tf_label, "summary": f'🔴高确信 {high_c} | 🟡中等 {mid_c} | ⚪低 {tf_total - high_c - mid_c}', "suggestion": suggestion})
     except Exception as e:
         strategies_list.append({"id": "three_factor", "name": "三因子", "strength": 0, "label": "❌异常", "summary": str(e)[:60], "suggestion": None})
 
     # 2. 网格信号
     try:
         bottom_c, top_c, signal_today, mid_c = 0, 0, 0, 0
-        best_bottom = None
-        today_str = datetime.now().strftime('%Y-%m-%d')
-
+        best_bottom = None; today_str = datetime.now().strftime('%Y-%m-%d')
         for code in codes:
             kline = fetch_kline(code, 250)
-            if len(kline) < 20:
-                continue
+            if len(kline) < 20: continue
             try:
                 result = analyze_grid(code, kline, GRID_DEFAULT)
                 pos = result.get('position_pct', 50)
-                if pos <= 20:
-                    bottom_c += 1
-                    if best_bottom is None or pos < best_bottom[1]:
-                        best_bottom = (code, pos, ETFS[code]["n"])
-                elif pos >= 80:
-                    top_c += 1
-                else:
-                    mid_c += 1
+                if pos <= 20: bottom_c += 1; best_bottom = (code, pos, ETFS[code]["n"]) if best_bottom is None or pos < best_bottom[1] else best_bottom
+                elif pos >= 80: top_c += 1
+                else: mid_c += 1
                 sig = result.get('recent_signal')
-                if sig and sig.get('date') == today_str:
-                    signal_today += 1
-            except:
-                continue
-
+                if sig and sig.get('date') == today_str: signal_today += 1
+            except: continue
         g_strength, g_label = 0, '⚪无信号'
-        if bottom_c > 0:
-            # 有ETF处于底部区间 (≤20%) → 买入机会
-            g_strength, g_label = 5, '🔥极强'
-        elif top_c > 0:
-            # 有ETF处于顶部区间 (≥80%) → 卖出机会
-            g_strength, g_label = 3, '🟡中等'
-        elif mid_c > 0:
-            # 全部在中枢 → 无交易信号 (与模拟盘建议一致)
-            g_strength, g_label = 1, '⚪偏弱'
-
+        if bottom_c > 0: g_strength, g_label = 5, '🔥极强'
+        elif top_c > 0: g_strength, g_label = 3, '🟡中等'
+        elif mid_c > 0: g_strength, g_label = 1, '⚪偏弱'
         suggestion_g = f"{best_bottom[0]} {best_bottom[2]} 位置{best_bottom[1]:.0f}%" if best_bottom else None
-        strategies_list.append({
-            "id": "grid", "name": "网格交易",
-            "strength": g_strength, "label": g_label,
-            "summary": f"📉底部 {bottom_c} | 📏中枢 {mid_c} | 📈顶部 {top_c}",
-            "suggestion": suggestion_g
-        })
+        strategies_list.append({"id": "grid", "name": "网格交易", "strength": g_strength, "label": g_label, "summary": f"📉底部 {bottom_c} | 📏中枢 {mid_c} | 📈顶部 {top_c}", "suggestion": suggestion_g})
     except Exception as e:
         strategies_list.append({"id": "grid", "name": "网格交易", "strength": 0, "label": "❌异常", "summary": str(e)[:60], "suggestion": None})
 
     max_str = max(strategies_list, key=lambda x: x['strength'])
     recommended = max_str['id'] if max_str['strength'] > 0 else None
-
     return jsonify({"strategies": strategies_list, "recommended": recommended, "time": datetime.now().isoformat()})
 
 
@@ -1204,9 +1095,5 @@ if __name__ == '__main__':
     print("=" * 60)
     print(f"API地址: http://localhost:5000")
     print(f"健康检查: http://localhost:5000/api/health")
-    print(f"ETF列表:  http://localhost:5000/api/etfs")
-    print(f"完整分析: http://localhost:5000/api/analysis")
-    print(f"单ETF:    http://localhost:5000/api/analysis/510300")
-    print(f"K线数据:  http://localhost:5000/api/kline/510300")
     print("=" * 60)
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

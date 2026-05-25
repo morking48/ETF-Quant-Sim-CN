@@ -804,102 +804,197 @@ function hideBacktest() { const el = document.getElementById('backtestOverlay');
 async function execBacktest() {
     const resultDiv = document.getElementById('backtestResult');
     if (!resultDiv) return;
-    resultDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">⏳ 回测中...</div>';
     const btMode = document.getElementById('bt_mode').value;
     const positionRatio = (+document.getElementById('bt_positionRatio').value) / 100;
     const buyThreshold = +document.getElementById('bt_buyThreshold').value;
+    
+    // 检测是否三因子模式 → 使用真份额数据(后台加载)
+    const useShares = activeStrategyId === 'three_factor' ||
+                      (typeof activeStrategyId === 'undefined' || activeStrategyId === null);
+    
     let body;
     if (btMode === 'custom') {
-        body = JSON.stringify({
+        body = {
             start_date: document.getElementById('bt_startDate').value,
             end_date: document.getElementById('bt_endDate').value,
-            position_ratio: positionRatio, buy_threshold: buyThreshold
-        });
+            position_ratio: positionRatio, buy_threshold: buyThreshold,
+            use_shares: useShares
+        };
     } else {
-        body = JSON.stringify({
+        body = {
             days: +document.getElementById('bt_days').value,
-            position_ratio: positionRatio, buy_threshold: buyThreshold
-        });
+            position_ratio: positionRatio, buy_threshold: buyThreshold,
+            use_shares: useShares
+        };
     }
+    
+    // 三因子模式：后台加载 + 进度轮询
+    if (useShares) {
+        showBtProgress();
+        try {
+            const resp = await fetch('/api/backtest', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const initData = await resp.json();
+            if (initData.job_id) {
+                pollBacktestStatus(initData.job_id);
+            } else {
+                hideBtProgress();
+                renderBacktestResult(initData, resultDiv);
+            }
+        } catch (err) {
+            hideBtProgress();
+            resultDiv.innerHTML = '<div style="color:var(--signal-high);">❌ 回测请求失败: ' + err.message + '</div>';
+        }
+        return;
+    }
+    
+    // 二因子模式：同步快速
+    resultDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">⏳ 回测中...</div>';
     try {
-        const resp = await fetch('/api/backtest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        const resp = await fetch('/api/backtest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
         const data = await resp.json();
         if (data.error) { resultDiv.innerHTML = '<div style="color:var(--signal-high);">❌ ' + data.error + '</div>'; return; }
-        const retColor = data.total_return >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
-        const retSign = data.total_return >= 0 ? '+' : '';
-        const benchColor = data.benchmark_return >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
-        const benchSign = data.benchmark_return >= 0 ? '+' : '';
-        const alpha = data.total_return - (data.benchmark_return || 0);
-        const alphaColor = alpha >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
-        const alphaSign = alpha >= 0 ? '+' : '';
-        const warningHtml = data.warning ? '<div style="background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.3);border-radius:6px;padding:8px;margin-bottom:12px;font-size:12px;color:#ffc107;">⚠️ ' + data.warning + '</div>' : '';
-
-        // 构建权益曲线图容器
-        const chartId = 'bt_equity_chart_' + Date.now();
-
-        resultDiv.innerHTML = '<div style="background:var(--bg-secondary);border-radius:8px;padding:16px;">' +
-            '<h4 style="margin-bottom:12px;color:var(--text-primary);">📈 回测结果</h4>' + warningHtml +
-            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">' +
-            '<div>📅 回测区间</div><div>' + data.start_date + ' ~ ' + data.end_date + '</div>' +
-            '<div>💰 初始资金</div><div>¥' + formatNumber(data.initial_capital, 0) + '</div>' +
-            '<div>📊 最终资产</div><div style="color:' + retColor + ';font-weight:700;">¥' + formatNumber(data.final_value, 2) + '</div>' +
-            '<div>📈 策略收益</div><div style="color:' + retColor + ';font-weight:700;">' + retSign + data.total_return + '%</div>' +
-            '<div>📉 基准收益</div><div style="color:' + benchColor + ';">' + benchSign + (data.benchmark_return || 0) + '% (沪深300)</div>' +
-            '<div>⭐ 超额收益</div><div style="color:' + alphaColor + ';font-weight:700;">' + alphaSign + alpha.toFixed(2) + '%</div>' +
-            '<div>🔢 交易次数</div><div>' + data.total_trades + '笔 (' + data.buy_count + '买/' + data.sell_count + '卖)</div>' +
-            '<div>🎯 胜率</div><div>' + data.win_rate + '% (' + data.win_count + '/' + data.total_trades + ')</div>' +
-            '<div>📉 最大回撤</div><div style="color:var(--signal-high);">' + data.max_drawdown + '%</div>' +
-            '<div>📐 夏普比</div><div>' + data.sharpe + '</div></div>' +
-            // 权益曲线图
-            (data.equity_curve && data.equity_curve.length > 0 ? '<div id="' + chartId + '" style="width:100%;height:280px;margin-top:16px;"></div>' : '') +
-            // 持仓明细
-            (data.equity_curve && data.equity_curve.some(e => e.positions && e.positions.length > 0) ?
-            '<div style="margin-top:12px;"><h5 style="color:var(--text-primary);margin-bottom:8px;">📋 持仓演变（最近10天有持仓的日期）</h5>' +
-            '<div style="max-height:200px;overflow-y:auto;"><table class="data-table" style="font-size:11px;">' +
-            '<thead><tr><th>日期</th><th>代码</th><th>名称</th><th>持仓</th><th>市值</th><th>权重</th><th>盈亏</th><th>持有天数</th></tr></thead><tbody>' +
-            data.equity_curve.filter(e => e.positions && e.positions.length > 0).slice(-10).reverse().map(e =>
-                e.positions.map(p => '<tr><td>' + e.date + '</td><td>' + p.code + '</td><td>' + (p.name || '') + '</td>' +
-                '<td>' + p.shares + '股</td><td>¥' + formatNumber(p.market_value, 0) + '</td>' +
-                '<td>' + p.weight_pct + '%</td><td style="color:' + (p.pnl_pct >= 0 ? 'var(--signal-low)' : 'var(--signal-high)') + '">' + (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '%</td>' +
-                '<td>' + p.hold_days + '天</td></tr>').join('')
-            ).join('') + '</tbody></table></div></div>' : '') +
-            // 交易记录（完整，可滚动）
-            (data.trades && data.trades.length > 0 ? '<div style="margin-top:12px;"><h5 style="color:var(--text-primary);margin-bottom:8px;">📜 交易记录（共' + data.trades.length + '笔）</h5>' +
-            '<div style="max-height:300px;overflow-y:auto;"><table class="data-table" style="font-size:11px;">' +
-                '<thead><tr><th>日期</th><th>操作</th><th>代码</th><th>名称</th><th>价格</th><th>份数</th><th>盈亏</th><th>原因</th></tr></thead><tbody>' +
-                data.trades.map(t => {
-                    const isBuy = t.action === 'BUY';
-                    const actionColor = isBuy ? 'var(--signal-low)' : 'var(--signal-high)';
-                    const pnlStr = t.pnl != null ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '--';
-                    return '<tr><td>' + t.date + '</td><td style="color:' + actionColor + ';font-weight:600;">' + (isBuy ? '买' : '卖') + '</td>' +
-                        '<td>' + t.code + '</td><td>' + (t.name || '') + '</td><td>' + t.price.toFixed(3) + '</td><td>' + t.shares + '</td><td>' + pnlStr + '</td><td style="font-size:10px;">' + (t.reason || '') + '</td></tr>';
-                }).join('') + '</tbody></table></div></div>' : '') + '</div>';
-
-        // 渲染权益曲线图
-        if (data.equity_curve && data.equity_curve.length > 0 && typeof echarts !== 'undefined') {
-            setTimeout(() => {
-                const chartDom = document.getElementById(chartId);
-                if (!chartDom) return;
-                const chart = echarts.init(chartDom);
-                const dates = data.equity_curve.map(e => e.date);
-                const strategyVals = data.equity_curve.map(e => e.total_value);
-                const benchVals = data.equity_curve.map(e => e.benchmark_value);
-                chart.setOption({
-                    tooltip: { trigger: 'axis' },
-                    legend: { data: ['策略权益', '沪深300基准'], top: 0, textStyle: { color: '#aaa', fontSize: 11 } },
-                    grid: { left: 60, right: 20, top: 30, bottom: 30 },
-                    xAxis: { type: 'category', data: dates, axisLabel: { color: '#888', fontSize: 10, rotate: 45 } },
-                    yAxis: { type: 'value', axisLabel: { color: '#888', fontSize: 10, formatter: v => '¥' + (v / 10000).toFixed(1) + '万' } },
-                    series: [
-                        { name: '策略权益', type: 'line', data: strategyVals, smooth: true, lineStyle: { color: '#4fc3f7', width: 2 }, itemStyle: { color: '#4fc3f7' }, symbol: 'none' },
-                        { name: '沪深300基准', type: 'line', data: benchVals, smooth: true, lineStyle: { color: '#ff8a65', width: 1.5, type: 'dashed' }, itemStyle: { color: '#ff8a65' }, symbol: 'none' }
-                    ]
-                });
-                window.addEventListener('resize', () => chart.resize());
-            }, 300);
-        }
+        renderBacktestResult(data, resultDiv);
     } catch (err) {
         resultDiv.innerHTML = '<div style="color:var(--signal-high);">❌ 回测失败: ' + err.message + '</div>';
+    }
+}
+
+// ========== 回测进度弹窗 ==========
+function showBtProgress() {
+    const existing = document.getElementById('btProgressOverlay');
+    if (existing) existing.remove();
+    const html = '<div class="config-overlay" id="btProgressOverlay" style="z-index:10000;background:rgba(0,0,0,0.6);">' +
+        '<div class="config-panel" style="width:420px;text-align:center;">' +
+        '<h3>📊 三因子回测准备中...</h3>' +
+        '<div style="font-size:13px;color:var(--text-secondary);margin:12px 0;" id="btProgMsg">正在加载份额数据...</div>' +
+        '<div style="background:var(--bg-secondary);border-radius:4px;height:8px;overflow:hidden;margin:8px 0;">' +
+        '<div id="btProgBar" style="height:100%;background:linear-gradient(90deg,#38bdf8,#818cf8);width:0%;transition:width 0.3s;"></div></div>' +
+        '<div style="font-size:11px;color:var(--text-muted);" id="btProgCount">0/0</div>' +
+        '<div style="margin-top:12px;"><button class="btn-sim btn-cancel" onclick="hideBtProgress()">✖ 取消等待</button></div>' +
+        '</div></div>';
+    document.body.insertAdjacentHTML('beforeend', html);
+    document.getElementById('backtestResult').innerHTML = '';
+}
+
+function hideBtProgress() {
+    const el = document.getElementById('btProgressOverlay');
+    if (el) el.remove();
+    if (window._btPollTimer) { clearTimeout(window._btPollTimer); window._btPollTimer = null; }
+}
+
+function pollBacktestStatus(jobId) {
+    const resultDiv = document.getElementById('backtestResult');
+    const poll = async () => {
+        try {
+            const resp = await fetch('/api/backtest/status/' + jobId);
+            const status = await resp.json();
+            const progMsg = document.getElementById('btProgMsg');
+            const progBar = document.getElementById('btProgBar');
+            const progCount = document.getElementById('btProgCount');
+            
+            if (progMsg) progMsg.textContent = status.message || '处理中...';
+            if (progBar && status.total > 0) {
+                progBar.style.width = Math.round(status.progress / status.total * 100) + '%';
+            } else if (progBar && status.status === 'computing') {
+                progBar.style.width = (status.total > 0 ? Math.round(status.progress / status.total * 100) : 50) + '%';
+            }
+            if (progCount) progCount.textContent = (status.progress || 0) + '/' + (status.total || '--');
+            
+            if (status.status === 'done') {
+                hideBtProgress();
+                renderBacktestResult(status.result, resultDiv);
+                return;
+            } else if (status.status === 'error') {
+                hideBtProgress();
+                resultDiv.innerHTML = '<div style="color:var(--signal-high);">❌ 回测失败: ' + (status.error || '未知错误') + '</div>';
+                return;
+            }
+            window._btPollTimer = setTimeout(poll, 1000);
+        } catch (err) {
+            hideBtProgress();
+            resultDiv.innerHTML = '<div style="color:var(--signal-high);">❌ 轮询失败: ' + err.message + '</div>';
+        }
+    };
+    poll();
+}
+
+function renderBacktestResult(data, resultDiv) {
+    const retColor = data.total_return >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
+    const retSign = data.total_return >= 0 ? '+' : '';
+    const benchColor = data.benchmark_return >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
+    const benchSign = data.benchmark_return >= 0 ? '+' : '';
+    const alpha = data.total_return - (data.benchmark_return || 0);
+    const alphaColor = alpha >= 0 ? 'var(--signal-low)' : 'var(--signal-high)';
+    const alphaSign = alpha >= 0 ? '+' : '';
+    const warningHtml = data.warning ? '<div style="background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.3);border-radius:6px;padding:8px;margin-bottom:12px;font-size:12px;color:#ffc107;">⚠️ ' + data.warning + '</div>' : '';
+    const modelTag = data.mode ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;">(' + data.mode + ')</span>' : '';
+
+    const chartId = 'bt_equity_chart_' + Date.now();
+
+    resultDiv.innerHTML = '<div style="background:var(--bg-secondary);border-radius:8px;padding:16px;">' +
+        '<h4 style="margin-bottom:12px;color:var(--text-primary);">📈 回测结果' + modelTag + '</h4>' + warningHtml +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">' +
+        '<div>📅 回测区间</div><div>' + data.start_date + ' ~ ' + data.end_date + '</div>' +
+        '<div>💰 初始资金</div><div>¥' + formatNumber(data.initial_capital, 0) + '</div>' +
+        '<div>📊 最终资产</div><div style="color:' + retColor + ';font-weight:700;">¥' + formatNumber(data.final_value, 2) + '</div>' +
+        '<div>📈 策略收益</div><div style="color:' + retColor + ';font-weight:700;">' + retSign + data.total_return + '%</div>' +
+        '<div>📉 基准收益</div><div style="color:' + benchColor + ';">' + benchSign + (data.benchmark_return || 0) + '% (沪深300)</div>' +
+        '<div>⭐ 超额收益</div><div style="color:' + alphaColor + ';font-weight:700;">' + alphaSign + alpha.toFixed(2) + '%</div>' +
+        '<div>🔢 交易次数</div><div>' + data.total_trades + '笔 (' + data.buy_count + '买/' + data.sell_count + '卖)</div>' +
+        '<div>🎯 胜率</div><div>' + data.win_rate + '% (' + data.win_count + '/' + data.total_trades + ')</div>' +
+        '<div>📉 最大回撤</div><div style="color:var(--signal-high);">' + data.max_drawdown + '%</div>' +
+        '<div>📐 夏普比</div><div>' + data.sharpe + '</div></div>' +
+        (data.equity_curve && data.equity_curve.length > 0 ? '<div id="' + chartId + '" style="width:100%;height:280px;margin-top:16px;"></div>' : '') +
+        (data.equity_curve && data.equity_curve.some(e => e.positions && e.positions.length > 0) ?
+        '<div style="margin-top:12px;"><h5 style="color:var(--text-primary);margin-bottom:8px;">📋 持仓演变（最近10天有持仓的日期）</h5>' +
+        '<div style="max-height:200px;overflow-y:auto;"><table class="data-table" style="font-size:11px;">' +
+        '<thead><tr><th>日期</th><th>代码</th><th>名称</th><th>持仓</th><th>市值</th><th>权重</th><th>盈亏</th><th>持有天数</th></tr></thead><tbody>' +
+        data.equity_curve.filter(e => e.positions && e.positions.length > 0).slice(-10).reverse().map(e =>
+            e.positions.map(p => '<tr><td>' + e.date + '</td><td>' + p.code + '</td><td>' + (p.name || '') + '</td>' +
+            '<td>' + p.shares + '股</td><td>¥' + formatNumber(p.market_value, 0) + '</td>' +
+            '<td>' + p.weight_pct + '%</td><td style="color:' + (p.pnl_pct >= 0 ? 'var(--signal-low)' : 'var(--signal-high)') + '">' + (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '%</td>' +
+            '<td>' + p.hold_days + '天</td></tr>').join('')
+        ).join('') + '</tbody></table></div></div>' : '') +
+        (data.trades && data.trades.length > 0 ? '<div style="margin-top:12px;"><h5 style="color:var(--text-primary);margin-bottom:8px;">📜 交易记录（共' + data.trades.length + '笔）</h5>' +
+        '<div style="max-height:300px;overflow-y:auto;"><table class="data-table" style="font-size:11px;">' +
+            '<thead><tr><th>日期</th><th>操作</th><th>代码</th><th>名称</th><th>价格</th><th>份数</th><th>盈亏</th><th>原因</th></tr></thead><tbody>' +
+            data.trades.map(t => {
+                const isBuy = t.action === 'BUY';
+                const actionColor = isBuy ? 'var(--signal-low)' : 'var(--signal-high)';
+                const pnlStr = t.pnl != null ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '--';
+                return '<tr><td>' + t.date + '</td><td style="color:' + actionColor + ';font-weight:600;">' + (isBuy ? '买' : '卖') + '</td>' +
+                    '<td>' + t.code + '</td><td>' + (t.name || '') + '</td><td>' + t.price.toFixed(3) + '</td><td>' + t.shares + '</td><td>' + pnlStr + '</td><td style="font-size:10px;">' + (t.reason || '') + '</td></tr>';
+            }).join('') + '</tbody></table></div></div>' : '') + '</div>';
+
+    if (data.equity_curve && data.equity_curve.length > 0 && typeof echarts !== 'undefined') {
+        setTimeout(() => {
+            const chartDom = document.getElementById(chartId);
+            if (!chartDom) return;
+            const chart = echarts.init(chartDom);
+            const dates = data.equity_curve.map(e => e.date);
+            const strategyVals = data.equity_curve.map(e => e.total_value);
+            const benchVals = data.equity_curve.map(e => e.benchmark_value);
+            chart.setOption({
+                tooltip: { trigger: 'axis' },
+                legend: { data: ['策略权益', '沪深300基准'], top: 0, textStyle: { color: '#aaa', fontSize: 11 } },
+                grid: { left: 60, right: 20, top: 30, bottom: 30 },
+                xAxis: { type: 'category', data: dates, axisLabel: { color: '#888', fontSize: 10, rotate: 45 } },
+                yAxis: { type: 'value', axisLabel: { color: '#888', fontSize: 10, formatter: v => '¥' + (v / 10000).toFixed(1) + '万' } },
+                series: [
+                    { name: '策略权益', type: 'line', data: strategyVals, smooth: true, lineStyle: { color: '#4fc3f7', width: 2 }, itemStyle: { color: '#4fc3f7' }, symbol: 'none' },
+                    { name: '沪深300基准', type: 'line', data: benchVals, smooth: true, lineStyle: { color: '#ff8a65', width: 1.5, type: 'dashed' }, itemStyle: { color: '#ff8a65' }, symbol: 'none' }
+                ]
+            });
+            window.addEventListener('resize', () => chart.resize());
+        }, 300);
     }
 }
 
