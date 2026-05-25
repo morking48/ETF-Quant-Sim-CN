@@ -720,11 +720,16 @@ def get_analysis():
             signal_backtrack.append({"date": d, "high": v["high"], "mid": v["mid"], "codes": v["codes"][:5]})
     signal_backtrack.sort(key=lambda x: x["date"], reverse=True)
 
+    idx_price = None
+    if idx_data:
+        idx_price = round(idx_data[-1]["c"], 2)
+
     return jsonify({
         "time": datetime.now().isoformat(), "target_date": target_date,
         "mode": "three_factor" if any_three_factor else "two_factor",
         "share_available": share_available,
         "share_status": "available" if share_available else "unavailable",
+        "index_price": idx_price,
         "summary": {"high": high_count, "mid": mid_count, "normal": normal_count, "error": error_count, "hs300_alert": hs300_high},
         "report": {"rating": rating, "avg_cp": avg_cp, "volume_ranking": volume_ranking, "direction": {"up": up_count, "down": down_count, "flat": flat_count, "consensus": direction_consensus}, "signal_backtrack": signal_backtrack[:10]},
         "etfs": results

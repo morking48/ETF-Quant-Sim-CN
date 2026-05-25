@@ -127,6 +127,17 @@ function initSimulator(capital) {
     return { config, positions, snapshots, trades };
 }
 
+// ========== 基准价格（沪深300起始价） ==========
+function getBenchmarkStart() {
+    try {
+        const raw = localStorage.getItem(_simKey('benchmark_start'));
+        return raw ? parseFloat(raw) : null;
+    } catch (e) { return null; }
+}
+function setBenchmarkStart(price) {
+    if (price != null) localStorage.setItem(_simKey('benchmark_start'), price);
+}
+
 /**
  * 每日结算：更新持仓市值
  * @param {Array} analysisData - API返回的完整分析数据 { etfs: [...] }

@@ -83,12 +83,19 @@ def run_grid_backtest(kline_data, config, code="510300"):
         "total_value": round(cash + shares * kline_data[59]["c"], 2),
     })
 
-    # 逐日运行（收盘价确认 + 3天冷却期）
+    # 逐日运行（收盘价确认 + 3天冷却期 + 每30天动态更新per_grid_shares）
     last_trade_date = None
     for i in range(60, len(kline_data)):
         d = kline_data[i]
         price = d["c"]
         prev_price = kline_data[i - 1]["c"]
+
+        # 每30天动态更新 per_grid_shares（防止价格漂移导致每格金额比例失衡）
+        if i % 30 == 0 and price > 0:
+            dynamic_per_capital = cash * (1 - config.get("reserve_pct", 10) / 100) / grid_params["layers"]
+            dynamic_shares = round(dynamic_per_capital / price / 100) * 100
+            if dynamic_shares >= 100:
+                per_grid_shares = dynamic_shares
 
         # 3天冷却期检查：与上次交易相隔不足3天则跳过
         if last_trade_date and _days_between_b(d["date"], last_trade_date) < 3:

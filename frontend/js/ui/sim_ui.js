@@ -1059,7 +1059,24 @@ function updateSimulator(analysisData) {
     if (!analysisData || !analysisData.etfs) return;
     const config = getSimConfig();
     const date = analysisData.target_date || new Date().toISOString().slice(0, 10);
-    const { positions } = initSimulator();
+    const { positions, snapshots } = initSimulator();
+
+    // 更新基准百分比（沪深300 起始价追踪）
+    if (analysisData.index_price != null) {
+        let benchmarkStart = getBenchmarkStart();
+        if (benchmarkStart == null) {
+            benchmarkStart = analysisData.index_price;
+            setBenchmarkStart(benchmarkStart);
+        }
+        const benchmarkPct = parseFloat(((analysisData.index_price - benchmarkStart) / benchmarkStart * 100).toFixed(2));
+        // 更新最新快照的benchmarkPct
+        if (snapshots.length > 0) {
+            const lastSnap = snapshots[snapshots.length - 1];
+            lastSnap.benchmarkPct = benchmarkPct;
+            lastSnap.date = lastSnap.date === 'init' ? date : lastSnap.date; // 修正init日期
+            saveSimSnapshots(snapshots);
+        }
+    }
 
     // 网格策略：从 position_pct / recent_signal 生成建议 + 自动交易
     if (activeStrategyId === 'grid') {
